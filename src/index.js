@@ -1,140 +1,269 @@
 /**
  * Morty Backend - Main Server Entry Point
- * AI-powered mortgage analysis platform for Israeli users
+ *
+ * Express server with complete security middleware stack:
+ * cors → helmet → requestId → rateLimit → morgan → json →
+ * sanitize → securityAudit → authGuard → routes → 404 → errorHandler
+ *
+ * @module index
  */
 
 require('dotenv').config();
 
 const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
 const morgan = require('morgan');
-const path = require('path');
-const fs = require('fs');
+const cookieParser = require('cookie-parser');
 
+// Internal modules
 const connectDB = require('./config/db');
 const logger = require('./utils/logger');
-const { errorHandler, notFoundHandler } = require('./utils/errors');
-const { apiLimiter, authLimiter } = require('./middleware/rateLimit');
+const { globalErrorHandler, notFoundHandler } = require('./middleware/errorHandler');
+const {
+  corsMiddleware,
+  helmetMiddleware,
+  generalRateLimit,
+  sanitizeRequest,
+  requestId,
+  securityAudit,
+} = require('./middleware/security');
 
-// Route imports
+// Route modules
 const authRoutes = require('./routes/auth');
 const profileRoutes = require('./routes/profile');
 const offersRoutes = require('./routes/offers');
 const analysisRoutes = require('./routes/analysis');
 const dashboardRoutes = require('./routes/dashboard');
 
+// ─────────────────────────────────────────────
+// App initialization
+// ─────────────────────────────────────────────
+
 const app = express();
 const PORT = process.env.PORT || 5000;
+const API_PREFIX = '/api/v1';
 
-// Ensure uploads directory exists
-const uploadsDir = process.env.UPLOAD_DIR || 'uploads';
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
+// ─────────────────────────────────────────────
+// Trust proxy (for Render.com deployment)
+// ─────────────────────────────────────────────
+
+// Trust the first proxy (Render's load balancer)
+// Required for correct IP detection with rate limiting
+app.set('trust proxy', 1);
+
+// ─────────────────────────────────────────────
+// Security Middleware (applied first)
+// Order: cors → helmet → requestId → rateLimit
+// ─────────────────────────────────────────────
+
+// 1. CORS - must be first to handle preflight requests
+app.use(corsMiddleware);
+
+// 2. Helmet - security headers
+app.use(helmetMiddleware);
+
+// 3. Request ID - for tracing and log correlation
+app.use(requestId);
+
+// 4. General rate limiting - applied to all routes
+app.use(generalRateLimit);
+
+// ─────────────────────────────────────────────
+// Request Parsing Middleware
+// ─────────────────────────────────────────────
+
+// 5. HTTP request logging
+if (process.env.NODE_ENV !== 'test') {
+  app.use(
+    morgan('combined', {
+      stream: {
+        write: (message) => logger.info(message.trim()),
+      },
+      skip: (req) => req.path === '/health',
+    })
+  );
 }
 
-// ─── Middleware Stack ────────────────────────────────────────────────────────
-
-// CORS configuration
-const corsOptions = {
-  origin: (origin, callback) => {
-    const allowedOrigins = [
-      process.env.FRONTEND_URL || 'http://localhost:3000',
-      'https://tambeej.github.io',
-      'http://localhost:5173',
-      'http://localhost:3000',
-    ];
-
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-};
-
-app.use(cors(corsOptions));
-
-// Security headers
+// 6. JSON body parser with size limit
 app.use(
-  helmet({
-    crossOriginResourcePolicy: { policy: 'cross-origin' },
-    contentSecurityPolicy: false,
+  express.json({
+    limit: '10kb', // Prevent large payload attacks
+    strict: true, // Only accept arrays and objects
   })
 );
 
-// Rate limiting
-app.use('/api/', apiLimiter);
-app.use('/api/v1/auth/', authLimiter);
-
-// Request logging
+// 7. URL-encoded body parser
 app.use(
-  morgan('combined', {
-    stream: { write: (message) => logger.info(message.trim()) },
+  express.urlencoded({
+    extended: true,
+    limit: '10kb',
   })
 );
 
-// Body parsing
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// 8. Cookie parser (for httpOnly cookie auth)
+app.use(cookieParser());
 
-// Serve uploaded files statically
-app.use('/uploads', express.static(path.join(process.cwd(), uploadsDir)));
+// ─────────────────────────────────────────────
+// Input Sanitization (after parsing, before routes)
+// ─────────────────────────────────────────────
 
-// ─── Routes ─────────────────────────────────────────────────────────────────
+// 9. Sanitize request data (XSS + NoSQL injection prevention)
+app.use(sanitizeRequest);
 
-// Health check
+// 10. Security audit (log suspicious patterns)
+app.use(securityAudit);
+
+// ─────────────────────────────────────────────
+// Health Check (no auth required)
+// ─────────────────────────────────────────────
+
+/**
+ * @route GET /health
+ * @desc Health check endpoint for Render.com and monitoring
+ * @access Public
+ */
 app.get('/health', (req, res) => {
   res.status(200).json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
+    status: 'healthy',
+    service: 'morty-backend',
+    version: process.env.npm_package_version || '1.0.0',
     environment: process.env.NODE_ENV || 'development',
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
   });
 });
 
-// API v1 routes
-app.use('/api/v1/auth', authRoutes);
-app.use('/api/v1/profile', profileRoutes);
-app.use('/api/v1/offers', offersRoutes);
-app.use('/api/v1/analysis', analysisRoutes);
-app.use('/api/v1/dashboard', dashboardRoutes);
+/**
+ * @route GET /api/v1/health
+ * @desc API health check
+ * @access Public
+ */
+app.get(`${API_PREFIX}/health`, (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    api: 'v1',
+    timestamp: new Date().toISOString(),
+  });
+});
 
-// ─── Error Handling ──────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// API Routes
+// ─────────────────────────────────────────────
 
+app.use(`${API_PREFIX}/auth`, authRoutes);
+app.use(`${API_PREFIX}/profile`, profileRoutes);
+app.use(`${API_PREFIX}/offers`, offersRoutes);
+app.use(`${API_PREFIX}/analysis`, analysisRoutes);
+app.use(`${API_PREFIX}/dashboard`, dashboardRoutes);
+
+// ─────────────────────────────────────────────
+// Error Handling (must be LAST)
+// ─────────────────────────────────────────────
+
+// 404 handler - must be after all routes
 app.use(notFoundHandler);
-app.use(errorHandler);
 
-// ─── Server Start ────────────────────────────────────────────────────────────
+// Global error handler - must be last middleware
+app.use(globalErrorHandler);
 
+// ─────────────────────────────────────────────
+// Server Startup
+// ─────────────────────────────────────────────
+
+/**
+ * Start the server after connecting to the database.
+ */
 const startServer = async () => {
   try {
+    // Connect to MongoDB
     await connectDB();
+    logger.info('Database connected successfully');
 
-    app.listen(PORT, () => {
-      logger.info(`Morty Backend running on port ${PORT}`);
-      logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
-      logger.info(`API Base: http://localhost:${PORT}/api/v1`);
+    // Start HTTP server
+    const server = app.listen(PORT, () => {
+      logger.info(`Morty backend server started`, {
+        port: PORT,
+        environment: process.env.NODE_ENV || 'development',
+        apiPrefix: API_PREFIX,
+        pid: process.pid,
+      });
     });
-  } catch (error) {
-    logger.error('Failed to start server:', error.message);
+
+    // ─────────────────────────────────────────────
+    // Graceful Shutdown
+    // ─────────────────────────────────────────────
+
+    /**
+     * Handle graceful shutdown signals.
+     * Closes server and database connections before exiting.
+     *
+     * @param {string} signal - OS signal (SIGTERM, SIGINT)
+     */
+    const gracefulShutdown = async (signal) => {
+      logger.info(`Received ${signal}. Starting graceful shutdown...`);
+
+      // Stop accepting new connections
+      server.close(async () => {
+        logger.info('HTTP server closed');
+
+        try {
+          // Close database connection
+          const mongoose = require('mongoose');
+          await mongoose.connection.close();
+          logger.info('Database connection closed');
+
+          logger.info('Graceful shutdown complete');
+          process.exit(0);
+        } catch (err) {
+          logger.error('Error during shutdown', { error: err.message });
+          process.exit(1);
+        }
+      });
+
+      // Force shutdown after 30 seconds
+      setTimeout(() => {
+        logger.error('Forced shutdown after timeout');
+        process.exit(1);
+      }, 30000);
+    };
+
+    // Register shutdown handlers
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+    // ─────────────────────────────────────────────
+    // Unhandled Error Handlers
+    // ─────────────────────────────────────────────
+
+    // Handle unhandled promise rejections
+    process.on('unhandledRejection', (reason, promise) => {
+      logger.error('Unhandled Promise Rejection', {
+        reason: reason?.message || reason,
+        stack: reason?.stack,
+      });
+      // In production, exit and let process manager restart
+      if (process.env.NODE_ENV === 'production') {
+        gracefulShutdown('unhandledRejection');
+      }
+    });
+
+    // Handle uncaught exceptions
+    process.on('uncaughtException', (err) => {
+      logger.error('Uncaught Exception', {
+        error: err.message,
+        stack: err.stack,
+      });
+      // Always exit on uncaught exceptions - state is unknown
+      gracefulShutdown('uncaughtException');
+    });
+
+    return server;
+  } catch (err) {
+    logger.error('Failed to start server', { error: err.message, stack: err.stack });
     process.exit(1);
   }
 };
 
-process.on('unhandledRejection', (err) => {
-  logger.error('Unhandled Promise Rejection:', err.message);
-  process.exit(1);
-});
-
-process.on('uncaughtException', (err) => {
-  logger.error('Uncaught Exception:', err.message);
-  process.exit(1);
-});
-
+// Start the server
 startServer();
 
-module.exports = app;
+module.exports = app; // Export for testing
