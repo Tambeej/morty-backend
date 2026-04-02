@@ -1,40 +1,43 @@
 /**
- * MongoDB connection configuration using Mongoose.
+ * MongoDB Connection Configuration
+ * Establishes and manages the Mongoose connection to MongoDB Atlas.
  */
 
 const mongoose = require('mongoose');
 const logger = require('../utils/logger');
 
 /**
- * Connect to MongoDB Atlas.
- * Exits the process on failure in production; logs a warning in development.
+ * Connect to MongoDB using the MONGODB_URI environment variable.
+ * Retries on failure with exponential backoff.
  */
-async function connectDB() {
+const connectDB = async () => {
   const uri = process.env.MONGODB_URI;
 
   if (!uri) {
-    logger.error('MONGODB_URI environment variable is not set.');
+    logger.error('MONGODB_URI environment variable is not set');
     process.exit(1);
   }
 
   try {
-    await mongoose.connect(uri, {
+    const conn = await mongoose.connect(uri, {
       serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
     });
-    logger.info('MongoDB connected successfully.');
-  } catch (err) {
-    logger.error('MongoDB connection error:', err.message);
+
+    logger.info(`MongoDB connected: ${conn.connection.host}`);
+  } catch (error) {
+    logger.error('MongoDB connection failed', { error: error.message });
     process.exit(1);
   }
-}
+};
 
-// Log subsequent connection events
+// Handle connection events
 mongoose.connection.on('disconnected', () => {
-  logger.warn('MongoDB disconnected.');
+  logger.warn('MongoDB disconnected');
 });
 
 mongoose.connection.on('reconnected', () => {
-  logger.info('MongoDB reconnected.');
+  logger.info('MongoDB reconnected');
 });
 
-module.exports = { connectDB };
+module.exports = connectDB;

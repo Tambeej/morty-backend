@@ -1,53 +1,103 @@
 /**
- * Authentication Controller
+ * Auth Controller
  * Handles user registration, login, token refresh, and logout.
  */
 
+const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-const { generateAccessToken, generateRefreshToken, verifyRefreshToken } = require('../utils/jwt');
-const { AppError } = require('../utils/errors');
 const logger = require('../utils/logger');
+const Joi = require('joi');
+
+// ─── Validation Schemas ───────────────────────────────────────────────────────
+
+const registerSchema = Joi.object({
+  email: Joi.string().email().lowercase().trim().required().messages({
+    'string.email': 'Please provide a valid email address',
+    'any.required': 'Email is required',
+  }),
+  password: Joi.string().min(8).required().messages({
+    'string.min': 'Password must be at least 8 characters',
+    'any.required': 'Password is required',
+  }),
+  phone: Joi.string()
+    .pattern(/^(\+972|0)[0-9]{8,9}$/)
+    .optional()
+    .messages({
+      'string.pattern.base': 'Please provide a valid Israeli phone number',
+    }),
+});
+
+const loginSchema = Joi.object({
+  email: Joi.string().email().lowercase().trim().required(),
+  password: Joi.string().required(),
+});
+
+// ─── Token Helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Generate a short-lived access token (24h).
+ */
+const generateAccessToken = (user) =>
+  jwt.sign(
+    { id: user._id, email: user.email },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
+  );
+
+/**
+ * Generate a long-lived refresh token (7d).
+ */
+const generateRefreshToken = (user) =>
+  jwt.sign(
+    { id: user._id },
+    process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+
+// ─── Controllers ─────────────────────────────────────────────────────────────
 
 /**
  * POST /api/v1/auth/register
- * Register a new user account.
  */
-async function register(req, res, next) {
+const register = async (req, res) => {
   try {
-    const { email, password, phone } = req.body;
+    const { error, value } = registerSchema.validate(req.body, {
+      abortEarly: false,
+      stripUnknown: true,
+    });
 
-    // Check if user already exists
-    const existingUser = await User.findOne({ email: email.toLowerCase() });
-    if (existingUser) {
-      return next(new AppError('Email address is already registered.', 409));
+    if (error) {
+      return res.status(422).json({
+        success: false,
+        message: 'Validation failed',
+        errors: error.details.map((d) => ({ field: d.path.join('.'), message: d.message })),
+      });
     }
 
-    // Create new user (password hashing handled by User model pre-save hook)
-    const user = new User({
-      email: email.toLowerCase(),
-      password,
-      phone: phone || undefined,
-    });
+    const existingUser = await User.findOne({ email: value.email });
+    if (existingUser) {
+      return res.status(409).json({
+        success: false,
+        message: 'An account with this email already exists',
+      });
+    }
 
-    // Generate refresh token and attach to user
-    const refreshToken = generateRefreshToken({ id: user._id.toString() });
-    user.refreshToken = refreshToken;
+    const user = await User.create(value);
 
-    await user.save();
+    const token = generateAccessToken(user);
+    const refresh = generateRefreshToken(user);
 
-    // Generate access token
-    const accessToken = generateAccessToken({
-      id: user._id.toString(),
-      email: user.email,
-    });
+    // Store refresh token hash in DB
+    user.refreshToken = refresh;
+    await user.save({ validateBeforeSave: false });
 
-    logger.info(`New user registered: ${user.email}`);
+    logger.info('New user registered', { userId: user._id, email: user.email });
 
     return res.status(201).json({
       success: true,
-      message: 'Registration successful.',
-      token: accessToken,
-      refreshToken,
+      message: 'Account created successfully',
+      token,
+      refreshToken: refresh,
       user: {
         id: user._id,
         email: user.email,
@@ -57,49 +107,52 @@ async function register(req, res, next) {
       },
     });
   } catch (err) {
-    logger.error('Register error:', err);
-    return next(err);
+    logger.error('Register error', { error: err.message });
+    return res.status(500).json({ success: false, message: 'Registration failed' });
   }
-}
+};
 
 /**
  * POST /api/v1/auth/login
- * Authenticate an existing user and return tokens.
  */
-async function login(req, res, next) {
+const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
-
-    // Find user by email (include password field explicitly)
-    const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
-    if (!user) {
-      return next(new AppError('Invalid email or password.', 401));
-    }
-
-    // Verify password
-    const isMatch = await user.comparePassword(password);
-    if (!isMatch) {
-      return next(new AppError('Invalid email or password.', 401));
-    }
-
-    // Generate tokens
-    const accessToken = generateAccessToken({
-      id: user._id.toString(),
-      email: user.email,
+    const { error, value } = loginSchema.validate(req.body, {
+      abortEarly: false,
+      stripUnknown: true,
     });
-    const refreshToken = generateRefreshToken({ id: user._id.toString() });
 
-    // Persist refresh token
-    user.refreshToken = refreshToken;
-    await user.save();
+    if (error) {
+      return res.status(422).json({
+        success: false,
+        message: 'Validation failed',
+        errors: error.details.map((d) => ({ field: d.path.join('.'), message: d.message })),
+      });
+    }
 
-    logger.info(`User logged in: ${user.email}`);
+    const user = await User.findOne({ email: value.email }).select('+password +refreshToken');
+    if (!user) {
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
+
+    const isMatch = await user.comparePassword(value.password);
+    if (!isMatch) {
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
+
+    const token = generateAccessToken(user);
+    const refresh = generateRefreshToken(user);
+
+    user.refreshToken = refresh;
+    await user.save({ validateBeforeSave: false });
+
+    logger.info('User logged in', { userId: user._id });
 
     return res.status(200).json({
       success: true,
-      message: 'Login successful.',
-      token: accessToken,
-      refreshToken,
+      message: 'Login successful',
+      token,
+      refreshToken: refresh,
       user: {
         id: user._id,
         email: user.email,
@@ -109,48 +162,37 @@ async function login(req, res, next) {
       },
     });
   } catch (err) {
-    logger.error('Login error:', err);
-    return next(err);
+    logger.error('Login error', { error: err.message });
+    return res.status(500).json({ success: false, message: 'Login failed' });
   }
-}
+};
 
 /**
  * POST /api/v1/auth/refresh
- * Issue a new access token using a valid refresh token.
  */
-async function refresh(req, res, next) {
+const refreshToken = async (req, res) => {
   try {
-    const { refreshToken } = req.body;
+    const { refreshToken: token } = req.body;
 
-    if (!refreshToken) {
-      return next(new AppError('Refresh token is required.', 400));
+    if (!token) {
+      return res.status(401).json({ success: false, message: 'Refresh token required' });
     }
 
-    // Verify the refresh token signature and expiry
-    let payload;
-    try {
-      payload = verifyRefreshToken(refreshToken);
-    } catch (err) {
-      return next(new AppError('Invalid or expired refresh token.', 401));
+    const decoded = jwt.verify(
+      token,
+      process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET
+    );
+
+    const user = await User.findById(decoded.id).select('+refreshToken');
+    if (!user || user.refreshToken !== token) {
+      return res.status(401).json({ success: false, message: 'Invalid refresh token' });
     }
 
-    // Ensure the token matches what is stored (rotation / revocation check)
-    const user = await User.findById(payload.id);
-    if (!user || user.refreshToken !== refreshToken) {
-      return next(new AppError('Refresh token has been revoked.', 401));
-    }
-
-    // Issue new tokens (rotate refresh token)
-    const newAccessToken = generateAccessToken({
-      id: user._id.toString(),
-      email: user.email,
-    });
-    const newRefreshToken = generateRefreshToken({ id: user._id.toString() });
+    const newAccessToken = generateAccessToken(user);
+    const newRefreshToken = generateRefreshToken(user);
 
     user.refreshToken = newRefreshToken;
-    await user.save();
-
-    logger.info(`Tokens refreshed for user: ${user.email}`);
+    await user.save({ validateBeforeSave: false });
 
     return res.status(200).json({
       success: true,
@@ -158,46 +200,33 @@ async function refresh(req, res, next) {
       refreshToken: newRefreshToken,
     });
   } catch (err) {
-    logger.error('Refresh error:', err);
-    return next(err);
+    return res.status(401).json({ success: false, message: 'Invalid or expired refresh token' });
   }
-}
+};
 
 /**
  * POST /api/v1/auth/logout
- * Invalidate the user's refresh token (requires valid access token).
  */
-async function logout(req, res, next) {
+const logout = async (req, res) => {
   try {
-    // req.user is set by the auth middleware
-    const user = await User.findById(req.user.id);
-    if (user) {
-      user.refreshToken = undefined;
-      await user.save();
-      logger.info(`User logged out: ${user.email}`);
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: 'Logged out successfully.',
-    });
+    await User.findByIdAndUpdate(req.user.id, { refreshToken: null });
+    logger.info('User logged out', { userId: req.user.id });
+    return res.status(200).json({ success: true, message: 'Logged out successfully' });
   } catch (err) {
-    logger.error('Logout error:', err);
-    return next(err);
+    logger.error('Logout error', { error: err.message });
+    return res.status(500).json({ success: false, message: 'Logout failed' });
   }
-}
+};
 
 /**
  * GET /api/v1/auth/me
- * Return the currently authenticated user's profile.
  */
-async function me(req, res, next) {
+const getMe = async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user) {
-      return next(new AppError('User not found.', 404));
+      return res.status(404).json({ success: false, message: 'User not found' });
     }
-
     return res.status(200).json({
       success: true,
       user: {
@@ -209,9 +238,9 @@ async function me(req, res, next) {
       },
     });
   } catch (err) {
-    logger.error('Me error:', err);
-    return next(err);
+    logger.error('getMe error', { error: err.message });
+    return res.status(500).json({ success: false, message: 'Failed to fetch user' });
   }
-}
+};
 
-module.exports = { register, login, refresh, logout, me };
+module.exports = { register, login, refreshToken, logout, getMe };

@@ -1,52 +1,48 @@
 /**
- * Authentication Middleware
- * Validates JWT access tokens on protected routes.
+ * JWT Authentication Middleware
+ * Verifies the Bearer token from the Authorization header.
+ * Attaches the decoded user payload to req.user.
  */
 
-const { verifyAccessToken } = require('../utils/jwt');
-const { AppError } = require('../utils/errors');
+const jwt = require('jsonwebtoken');
 const logger = require('../utils/logger');
 
 /**
- * authenticate middleware
- * Extracts the Bearer token from the Authorization header,
- * verifies it, and attaches the decoded payload to req.user.
- *
  * @param {import('express').Request} req
  * @param {import('express').Response} res
  * @param {import('express').NextFunction} next
  */
-function authenticate(req, res, next) {
-  try {
-    const authHeader = req.headers.authorization;
+const authMiddleware = (req, res, next) => {
+  const authHeader = req.headers.authorization;
 
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return next(new AppError('Authentication token is missing or malformed.', 401));
-    }
-
-    const token = authHeader.split(' ')[1];
-
-    let decoded;
-    try {
-      decoded = verifyAccessToken(token);
-    } catch (err) {
-      if (err.name === 'TokenExpiredError') {
-        return next(new AppError('Access token has expired. Please refresh your session.', 401));
-      }
-      return next(new AppError('Invalid access token.', 401));
-    }
-
-    // Attach user info to request for downstream handlers
-    req.user = {
-      id: decoded.id,
-      email: decoded.email,
-    };
-
-    return next();
-  } catch (err) {
-    logger.error('Auth middleware error:', err);
-    return next(new AppError('Authentication failed.', 500));
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      success: false,
+      message: 'Access denied. No token provided.',
+    });
   }
-}
 
-module.exports = { authenticate };
+  const token = authHeader.split(' ')[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded; // { id, email, iat, exp }
+    next();
+  } catch (error) {
+    logger.warn('Invalid JWT token', { error: error.message });
+
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({
+        success: false,
+        message: 'Token expired. Please log in again.',
+      });
+    }
+
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid token.',
+    });
+  }
+};
+
+module.exports = authMiddleware;

@@ -1,40 +1,33 @@
 /**
- * Winston logger configuration.
- * Outputs structured JSON in production, colourised text in development.
+ * Winston Logger Utility
+ * Provides structured logging with different transports for dev/prod.
  */
 
 const { createLogger, format, transports } = require('winston');
 
-const { combine, timestamp, printf, colorize, errors, json } = format;
+const { combine, timestamp, printf, colorize, errors } = format;
 
-const isDev = process.env.NODE_ENV !== 'production';
+const devFormat = printf(({ level, message, timestamp: ts, stack, ...meta }) => {
+  const metaStr = Object.keys(meta).length ? `\n${JSON.stringify(meta, null, 2)}` : '';
+  return `${ts} [${level}]: ${stack || message}${metaStr}`;
+});
 
-/** Human-readable format for development */
-const devFormat = combine(
-  colorize(),
-  timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-  errors({ stack: true }),
-  printf(({ level, message, timestamp: ts, stack }) => {
-    return stack
-      ? `${ts} [${level}]: ${message}\n${stack}`
-      : `${ts} [${level}]: ${message}`;
-  })
-);
-
-/** Structured JSON format for production */
-const prodFormat = combine(
-  timestamp(),
-  errors({ stack: true }),
-  json()
-);
+const prodFormat = printf((info) => JSON.stringify(info));
 
 const logger = createLogger({
-  level: process.env.LOG_LEVEL || (isDev ? 'debug' : 'info'),
-  format: isDev ? devFormat : prodFormat,
+  level: process.env.LOG_LEVEL || 'info',
+  format: combine(
+    timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+    errors({ stack: true })
+  ),
   transports: [
-    new transports.Console(),
+    new transports.Console({
+      format:
+        process.env.NODE_ENV === 'production'
+          ? prodFormat
+          : combine(colorize(), devFormat),
+    }),
   ],
-  exitOnError: false,
 });
 
 module.exports = logger;

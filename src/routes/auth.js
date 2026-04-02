@@ -1,53 +1,55 @@
 /**
- * Authentication Routes
- * Mounts all /api/v1/auth/* endpoints.
+ * Auth Routes
+ * Handles user registration, login, token refresh, and logout.
+ *
+ * Base path: /api/v1/auth
  */
 
 const express = require('express');
 const router = express.Router();
-
-const { register, login, refresh, logout, me } = require('../controllers/authController');
-const { authenticate } = require('../middleware/auth');
-const { validate } = require('../middleware/validate');
 const {
-  registerSchema,
-  loginSchema,
-  refreshTokenSchema,
-} = require('../validators/authValidators');
+  register,
+  login,
+  refreshToken,
+  logout,
+  getMe,
+} = require('../controllers/authController');
+const authMiddleware = require('../middleware/auth');
+const authRateLimiter = require('../middleware/rateLimit');
 
 /**
  * @route   POST /api/v1/auth/register
  * @desc    Register a new user
  * @access  Public
  */
-router.post('/register', validate(registerSchema), register);
+router.post('/register', authRateLimiter, register);
 
 /**
  * @route   POST /api/v1/auth/login
- * @desc    Login and receive JWT tokens
+ * @desc    Authenticate user and return JWT tokens
  * @access  Public
  */
-router.post('/login', validate(loginSchema), login);
+router.post('/login', authRateLimiter, login);
 
 /**
  * @route   POST /api/v1/auth/refresh
  * @desc    Refresh access token using refresh token
  * @access  Public
  */
-router.post('/refresh', validate(refreshTokenSchema), refresh);
+router.post('/refresh', refreshToken);
 
 /**
  * @route   POST /api/v1/auth/logout
- * @desc    Logout and invalidate refresh token
- * @access  Private (requires valid access token)
+ * @desc    Invalidate refresh token
+ * @access  Private
  */
-router.post('/logout', authenticate, logout);
+router.post('/logout', authMiddleware, logout);
 
 /**
  * @route   GET /api/v1/auth/me
- * @desc    Get current authenticated user
+ * @desc    Get current authenticated user info
  * @access  Private
  */
-router.get('/me', authenticate, me);
+router.get('/me', authMiddleware, getMe);
 
 module.exports = router;

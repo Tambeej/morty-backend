@@ -19,10 +19,6 @@ pids/
 *.seed
 *.pid.lock
 
-# Coverage
-coverage/
-.nyc_output/
-
 # Build output
 dist/
 build/
@@ -31,12 +27,15 @@ build/
 .DS_Store
 Thumbs.db
 
-# Editor
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 
+# Test coverage
+coverage/
+.nyc_output/
+
 # Uploads (local dev)
 uploads/
-tmp/
