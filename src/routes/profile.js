@@ -1,28 +1,29 @@
 /**
- * Profile Routes
- * Handles user financial profile CRUD operations
+ * Profile / financial data routes
+ * GET  /api/v1/profile/financials
+ * PUT  /api/v1/profile/financials
  */
-
 const express = require('express');
 const router = express.Router();
-const { getFinancials, upsertFinancials } = require('../controllers/profileController');
-const authMiddleware = require('../middleware/auth');
-const { validate, schemas } = require('../middleware/validate');
+const profileController = require('../controllers/profileController');
+const { validate, financialSchema } = require('../middleware/validate');
+const { protect } = require('../middleware/auth');
 
-router.use(authMiddleware);
-
-/**
- * @route   GET /api/v1/profile
- * @desc    Get user financial profile
- * @access  Private
- */
-router.get('/', getFinancials);
+// All profile routes require authentication
+router.use(protect);
 
 /**
- * @route   PUT /api/v1/profile
- * @desc    Create or update user financial profile
- * @access  Private
+ * @route  GET /api/v1/profile/financials
+ * @desc   Get the authenticated user's financial profile
+ * @access Private
  */
-router.put('/', validate(schemas.financials), upsertFinancials);
+router.get('/financials', profileController.getFinancials);
+
+/**
+ * @route  PUT /api/v1/profile/financials
+ * @desc   Create or update the authenticated user's financial profile
+ * @access Private
+ */
+router.put('/financials', validate(financialSchema), profileController.upsertFinancials);
 
 module.exports = router;

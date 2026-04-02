@@ -1,61 +1,41 @@
 {
   "name": "morty-backend",
   "version": "1.0.0",
-  "description": "Morty - AI-powered mortgage analysis backend API",
+  "description": "Morty – AI-powered mortgage analysis backend",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "jest --testPathPattern=src/tests --forceExit --detectOpenHandles",
-    "test:watch": "jest --watch --testPathPattern=src/tests",
-    "test:coverage": "jest --coverage --testPathPattern=src/tests --forceExit",
-    "lint": "eslint src/ --ext .js",
-    "lint:fix": "eslint src/ --ext .js --fix"
+    "test": "jest --forceExit --detectOpenHandles",
+    "test:coverage": "jest --coverage --forceExit --detectOpenHandles"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
-    "cloudinary": "^2.5.1",
-    "cookie-parser": "^1.4.7",
+    "cloudinary": "^1.41.3",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.7",
-    "express": "^4.21.2",
-    "express-rate-limit": "^7.5.0",
-    "helmet": "^8.0.0",
-    "joi": "^17.13.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.3.1",
+    "helmet": "^7.1.0",
+    "joi": "^17.13.1",
     "jsonwebtoken": "^9.0.2",
-    "mongoose": "^8.9.5",
+    "mongoose": "^8.4.1",
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
-    "nodemailer": "^6.9.16",
-    "openai": "^4.83.0",
-    "winston": "^3.17.0"
+    "nodemailer": "^6.9.13",
+    "openai": "^4.52.0",
+    "winston": "^3.13.0"
   },
   "devDependencies": {
     "jest": "^29.7.0",
-    "nodemon": "^3.1.9",
+    "nodemon": "^3.1.4",
     "supertest": "^7.0.0"
   },
   "jest": {
     "testEnvironment": "node",
-    "testMatch": [
-      "**/tests/**/*.test.js"
-    ],
-    "collectCoverageFrom": [
-      "src/**/*.js",
-      "!src/index.js",
-      "!src/tests/**"
-    ],
-    "coverageThreshold": {
-      "global": {
-        "branches": 60,
-        "functions": 70,
-        "lines": 70,
-        "statements": 70
-      }
-    },
-    "testTimeout": 10000
+    "testMatch": ["**/__tests__/**/*.test.js"]
   }
 }

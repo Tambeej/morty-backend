@@ -1,8 +1,6 @@
 /**
- * Financial Model
- * Stores user financial profile data
+ * Financial profile Mongoose model
  */
-
 const mongoose = require('mongoose');
 
 const financialSchema = new mongoose.Schema(
@@ -12,21 +10,25 @@ const financialSchema = new mongoose.Schema(
       ref: 'User',
       required: true,
       unique: true,
-      index: true,
     },
     income: {
       type: Number,
-      required: [true, 'Monthly income is required'],
-      min: [0, 'Income cannot be negative'],
+      required: true,
+      min: 0,
+    },
+    additionalIncome: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
     expenses: {
-      housing: { type: Number, default: 0, min: 0 },
-      loans: { type: Number, default: 0, min: 0 },
-      other: { type: Number, default: 0, min: 0 },
+      housing: { type: Number, default: 0 },
+      loans: { type: Number, default: 0 },
+      other: { type: Number, default: 0 },
     },
     assets: {
-      savings: { type: Number, default: 0, min: 0 },
-      investments: { type: Number, default: 0, min: 0 },
+      savings: { type: Number, default: 0 },
+      investments: { type: Number, default: 0 },
     },
     debts: [
       {
@@ -39,9 +41,7 @@ const financialSchema = new mongoose.Schema(
       default: Date.now,
     },
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true }
 );
 
 module.exports = mongoose.model('Financial', financialSchema);

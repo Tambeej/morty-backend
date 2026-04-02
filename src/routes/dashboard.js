@@ -1,21 +1,19 @@
 /**
- * Dashboard Routes
- * Handles dashboard summary and statistics
+ * Dashboard routes
+ * GET /api/v1/dashboard  – summary data for the authenticated user
  */
-
 const express = require('express');
 const router = express.Router();
-const { getDashboardSummary } = require('../controllers/analysisController');
-const authMiddleware = require('../middleware/auth');
+const dashboardController = require('../controllers/dashboardController');
+const { protect } = require('../middleware/auth');
 
-// All dashboard routes require authentication
-router.use(authMiddleware);
+router.use(protect);
 
 /**
- * @route   GET /api/v1/dashboard
- * @desc    Get dashboard summary with stats, best rates, and recent offers
- * @access  Private
+ * @route  GET /api/v1/dashboard
+ * @desc   Get dashboard summary (best rate, savings, offer count)
+ * @access Private
  */
-router.get('/', getDashboardSummary);
+router.get('/', dashboardController.getSummary);
 
 module.exports = router;

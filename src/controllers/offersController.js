@@ -1,213 +1,131 @@
 /**
- * Offers Controller
- * Handles mortgage offer file uploads and OCR processing
+ * Offers controller
+ * Handles file upload, listing, retrieval, deletion, and stats.
  */
-
 const Offer = require('../models/Offer');
-const Financial = require('../models/Financial');
-const { extractMortgageData, analyzeMortgage } = require('../services/aiService');
+const cloudinary = require('../config/cloudinary');
+const aiService = require('../services/aiService');
 const logger = require('../utils/logger');
-const { AppError } = require('../utils/errors');
+const fs = require('fs');
 
 /**
  * POST /api/v1/offers
- * Upload a mortgage offer document
+ * Accepts multipart/form-data with field 'file' and optional 'bankName'.
  */
-const uploadOffer = async (req, res, next) => {
+exports.uploadOffer = async (req, res) => {
   try {
     if (!req.file) {
-      return next(new AppError('No file uploaded', 400));
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
     }
 
-    const userId = req.user.id;
+    const { bankName } = req.body;
 
-    const fileUrl = req.file.path || '';
-    const mimetype = req.file.mimetype || 'application/pdf';
-    const originalName = req.file.originalname || 'offer';
-    const size = req.file.size || 0;
+    // Upload to Cloudinary
+    let cloudinaryResult;
+    try {
+      cloudinaryResult = await cloudinary.uploader.upload(req.file.path, {
+        folder: 'morty/offers',
+        resource_type: 'auto',
+      });
+    } finally {
+      // Remove temp file regardless of Cloudinary result
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    }
 
-    // Create offer record with pending status
     const offer = await Offer.create({
-      userId,
-      originalFile: {
-        url: fileUrl,
-        mimetype,
-        originalName,
-        size,
-      },
+      userId: req.user._id,
+      originalFile: { url: cloudinaryResult.secure_url, mimetype: req.file.mimetype },
+      extractedData: { bank: bankName || '' },
       status: 'pending',
     });
 
-    logger.info(`Offer created: ${offer._id} for user ${userId}`);
+    // Trigger async AI analysis (non-blocking)
+    aiService.analyzeOffer(offer._id).catch((err) =>
+      logger.error(`AI analysis failed for offer ${offer._id}: ${err.message}`)
+    );
 
-    // Process OCR and analysis asynchronously
-    setImmediate(async () => {
-      try {
-        logger.info(`Starting OCR extraction for offer ${offer._id}`);
+    return res.status(201).json({ success: true, data: offer });
+  } catch (err) {
+    logger.error('uploadOffer error: ' + err.message);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
 
-        const extractedData = await extractMortgageData(fileUrl, mimetype);
-        await Offer.findByIdAndUpdate(offer._id, { extractedData });
+/**
+ * GET /api/v1/offers/stats
+ */
+exports.getStats = async (req, res) => {
+  try {
+    const [total, pending, analyzed, error] = await Promise.all([
+      Offer.countDocuments({ userId: req.user._id }),
+      Offer.countDocuments({ userId: req.user._id, status: 'pending' }),
+      Offer.countDocuments({ userId: req.user._id, status: 'analyzed' }),
+      Offer.countDocuments({ userId: req.user._id, status: 'error' }),
+    ]);
 
-        logger.info(`OCR complete for offer ${offer._id}, starting analysis`);
-
-        const financial = await Financial.findOne({ userId }).lean();
-        const analysis = await analyzeMortgage(extractedData, financial);
-
-        await Offer.findByIdAndUpdate(offer._id, {
-          extractedData,
-          analysis: {
-            recommendedRate: analysis.recommendedRate,
-            savings: analysis.potentialSavings || 0,
-            aiReasoning: analysis.aiReasoning,
-            monthlyPayment: analysis.monthlyPayment,
-            totalCost: analysis.totalCost,
-            totalInterest: analysis.totalInterest,
-            marketAverageRate: analysis.marketAverageRate,
-            rateVsMarket: analysis.rateVsMarket,
-            debtToIncomeRatio: analysis.debtToIncomeRatio,
-            affordabilityScore: analysis.affordabilityScore,
-            recommendations: analysis.recommendations,
-            analysisSource: analysis.analysisSource,
-            analyzedAt: new Date(),
-          },
-          status: 'analyzed',
-        });
-
-        logger.info(`Analysis complete for offer ${offer._id}`);
-      } catch (err) {
-        logger.error(`Processing failed for offer ${offer._id}:`, err.message);
-        await Offer.findByIdAndUpdate(offer._id, { status: 'error' });
-      }
-    });
-
-    res.status(201).json({
-      success: true,
-      message: 'Offer uploaded successfully. Analysis in progress.',
-      data: {
-        offerId: offer._id,
-        status: offer.status,
-        originalFile: offer.originalFile,
-        createdAt: offer.createdAt,
-      },
-    });
-  } catch (error) {
-    logger.error('Upload offer error:', error.message);
-    next(error);
+    return res.status(200).json({ success: true, data: { total, pending, analyzed, error } });
+  } catch (err) {
+    logger.error('getStats error: ' + err.message);
+    return res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
 /**
  * GET /api/v1/offers
- * Get all offers for the authenticated user
  */
-const getOffers = async (req, res, next) => {
+exports.listOffers = async (req, res) => {
   try {
-    const userId = req.user.id;
-    const { page = 1, limit = 10, status } = req.query;
-
-    const query = { userId };
-    if (status) query.status = status;
-
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
+    const skip = (page - 1) * limit;
 
     const [offers, total] = await Promise.all([
-      Offer.find(query)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit))
-        .lean(),
-      Offer.countDocuments(query),
+      Offer.find({ userId: req.user._id }).sort({ createdAt: -1 }).skip(skip).limit(limit),
+      Offer.countDocuments({ userId: req.user._id }),
     ]);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      data: {
-        offers: offers.map((offer) => ({
-          id: offer._id,
-          status: offer.status,
-          originalFile: offer.originalFile,
-          extractedData: offer.extractedData,
-          analysis: offer.analysis,
-          createdAt: offer.createdAt,
-          updatedAt: offer.updatedAt,
-        })),
-        pagination: {
-          total,
-          page: parseInt(page),
-          limit: parseInt(limit),
-          pages: Math.ceil(total / parseInt(limit)),
-        },
-      },
+      data: offers,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     });
-  } catch (error) {
-    logger.error('Get offers error:', error.message);
-    next(error);
+  } catch (err) {
+    logger.error('listOffers error: ' + err.message);
+    return res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
 /**
  * GET /api/v1/offers/:id
- * Get a specific offer by ID
  */
-const getOffer = async (req, res, next) => {
+exports.getOffer = async (req, res) => {
   try {
-    const { id } = req.params;
-    const userId = req.user.id;
-
-    const offer = await Offer.findOne({ _id: id, userId }).lean();
-
+    const offer = await Offer.findOne({ _id: req.params.id, userId: req.user._id });
     if (!offer) {
-      return next(new AppError('Offer not found', 404));
+      return res.status(404).json({ success: false, message: 'Offer not found' });
     }
-
-    res.status(200).json({
-      success: true,
-      data: {
-        id: offer._id,
-        status: offer.status,
-        originalFile: offer.originalFile,
-        extractedData: offer.extractedData,
-        analysis: offer.analysis,
-        createdAt: offer.createdAt,
-        updatedAt: offer.updatedAt,
-      },
-    });
-  } catch (error) {
-    logger.error('Get offer error:', error.message);
-    next(error);
+    return res.status(200).json({ success: true, data: offer });
+  } catch (err) {
+    logger.error('getOffer error: ' + err.message);
+    return res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
 /**
  * DELETE /api/v1/offers/:id
- * Delete a specific offer
  */
-const deleteOffer = async (req, res, next) => {
+exports.deleteOffer = async (req, res) => {
   try {
-    const { id } = req.params;
-    const userId = req.user.id;
-
-    const offer = await Offer.findOneAndDelete({ _id: id, userId });
-
+    const offer = await Offer.findOne({ _id: req.params.id, userId: req.user._id });
     if (!offer) {
-      return next(new AppError('Offer not found', 404));
+      return res.status(404).json({ success: false, message: 'Offer not found' });
     }
-
-    logger.info(`Offer ${id} deleted by user ${userId}`);
-
-    res.status(200).json({
-      success: true,
-      message: 'Offer deleted successfully',
-    });
-  } catch (error) {
-    logger.error('Delete offer error:', error.message);
-    next(error);
+    await offer.deleteOne();
+    return res.status(200).json({ success: true, message: 'Offer deleted' });
+  } catch (err) {
+    logger.error('deleteOffer error: ' + err.message);
+    return res.status(500).json({ success: false, message: 'Server error' });
   }
-};
-
-module.exports = {
-  uploadOffer,
-  getOffers,
-  getOffer,
-  deleteOffer,
 };
