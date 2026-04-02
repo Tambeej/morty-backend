@@ -1,307 +1,213 @@
 /**
  * Offers Controller
- * Handles mortgage offer file uploads, retrieval, and deletion.
- * Integrates with Cloudinary for file storage.
+ * Handles mortgage offer file uploads and OCR processing
  */
 
 const Offer = require('../models/Offer');
-const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
-const { AppError } = require('../utils/errors');
+const Financial = require('../models/Financial');
+const { extractMortgageData, analyzeMortgage } = require('../services/aiService');
 const logger = require('../utils/logger');
-
-/**
- * Determine Cloudinary resource type based on MIME type.
- * PDFs must use 'raw', images use 'image'.
- *
- * @param {string} mimetype - File MIME type
- * @returns {string} Cloudinary resource type
- */
-const getCloudinaryResourceType = (mimetype) => {
-  if (mimetype === 'application/pdf') return 'raw';
-  return 'image';
-};
+const { AppError } = require('../utils/errors');
 
 /**
  * POST /api/v1/offers
- * Upload a new mortgage offer file.
- *
- * Accepts multipart/form-data with:
- *   - file: PDF, PNG, or JPG (max 5MB)
- *   - bankName (optional): name of the bank
- *
- * Flow:
- *   1. Validate file (done by Multer middleware)
- *   2. Upload file buffer to Cloudinary
- *   3. Create Offer document in MongoDB with 'pending' status
- *   4. Return offer data to client
- *   5. (AI analysis triggered separately in task 6)
- *
- * @param {Object} req - Express request (req.file from Multer, req.user from auth)
- * @param {Object} res - Express response
- * @param {Function} next - Next middleware
+ * Upload a mortgage offer document
  */
 const uploadOffer = async (req, res, next) => {
   try {
-    const { file } = req;
-    const userId = req.user.id;
-    const { bankName } = req.body;
-
-    logger.info(`User ${userId} uploading offer: ${file.originalname} (${file.mimetype}, ${file.size} bytes)`);
-
-    // Determine Cloudinary resource type
-    const resourceType = getCloudinaryResourceType(file.mimetype);
-
-    // Upload file buffer to Cloudinary
-    let cloudinaryResult;
-    try {
-      cloudinaryResult = await uploadToCloudinary(file.buffer, {
-        folder: `morty/offers/${userId}`,
-        resourceType,
-        // Use original filename (sanitized) as part of the public ID context
-        context: {
-          original_name: file.originalname,
-          user_id: userId.toString(),
-        },
-      });
-    } catch (uploadError) {
-      logger.error(`Cloudinary upload failed for user ${userId}:`, uploadError);
-      return next(new AppError('Failed to store the uploaded file. Please try again.', 502));
+    if (!req.file) {
+      return next(new AppError('No file uploaded', 400));
     }
 
-    logger.info(`File uploaded to Cloudinary: ${cloudinaryResult.public_id}`);
+    const userId = req.user.id;
 
-    // Create Offer document in MongoDB
+    const fileUrl = req.file.path || '';
+    const mimetype = req.file.mimetype || 'application/pdf';
+    const originalName = req.file.originalname || 'offer';
+    const size = req.file.size || 0;
+
+    // Create offer record with pending status
     const offer = await Offer.create({
       userId,
       originalFile: {
-        url: cloudinaryResult.secure_url,
-        publicId: cloudinaryResult.public_id,
-        mimetype: file.mimetype,
-        originalName: file.originalname,
-        size: file.size,
-      },
-      // Pre-populate bank name if provided
-      extractedData: {
-        bank: bankName || null,
+        url: fileUrl,
+        mimetype,
+        originalName,
+        size,
       },
       status: 'pending',
     });
 
     logger.info(`Offer created: ${offer._id} for user ${userId}`);
 
+    // Process OCR and analysis asynchronously
+    setImmediate(async () => {
+      try {
+        logger.info(`Starting OCR extraction for offer ${offer._id}`);
+
+        const extractedData = await extractMortgageData(fileUrl, mimetype);
+        await Offer.findByIdAndUpdate(offer._id, { extractedData });
+
+        logger.info(`OCR complete for offer ${offer._id}, starting analysis`);
+
+        const financial = await Financial.findOne({ userId }).lean();
+        const analysis = await analyzeMortgage(extractedData, financial);
+
+        await Offer.findByIdAndUpdate(offer._id, {
+          extractedData,
+          analysis: {
+            recommendedRate: analysis.recommendedRate,
+            savings: analysis.potentialSavings || 0,
+            aiReasoning: analysis.aiReasoning,
+            monthlyPayment: analysis.monthlyPayment,
+            totalCost: analysis.totalCost,
+            totalInterest: analysis.totalInterest,
+            marketAverageRate: analysis.marketAverageRate,
+            rateVsMarket: analysis.rateVsMarket,
+            debtToIncomeRatio: analysis.debtToIncomeRatio,
+            affordabilityScore: analysis.affordabilityScore,
+            recommendations: analysis.recommendations,
+            analysisSource: analysis.analysisSource,
+            analyzedAt: new Date(),
+          },
+          status: 'analyzed',
+        });
+
+        logger.info(`Analysis complete for offer ${offer._id}`);
+      } catch (err) {
+        logger.error(`Processing failed for offer ${offer._id}:`, err.message);
+        await Offer.findByIdAndUpdate(offer._id, { status: 'error' });
+      }
+    });
+
     res.status(201).json({
       success: true,
-      message: 'Mortgage offer uploaded successfully. Analysis is queued.',
+      message: 'Offer uploaded successfully. Analysis in progress.',
       data: {
-        offer,
+        offerId: offer._id,
+        status: offer.status,
+        originalFile: offer.originalFile,
+        createdAt: offer.createdAt,
       },
     });
   } catch (error) {
-    logger.error('uploadOffer error:', error);
+    logger.error('Upload offer error:', error.message);
     next(error);
   }
 };
 
 /**
  * GET /api/v1/offers
- * List all mortgage offers for the authenticated user.
- *
- * Query params:
- *   - status: filter by status ('pending' | 'processing' | 'analyzed' | 'error')
- *   - page: page number (default: 1)
- *   - limit: items per page (default: 10, max: 50)
- *
- * @param {Object} req - Express request
- * @param {Object} res - Express response
- * @param {Function} next - Next middleware
+ * Get all offers for the authenticated user
  */
-const listOffers = async (req, res, next) => {
+const getOffers = async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const { status } = req.query;
+    const { page = 1, limit = 10, status } = req.query;
 
-    // Pagination
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 10));
-    const skip = (page - 1) * limit;
+    const query = { userId };
+    if (status) query.status = status;
 
-    // Build query filter
-    const filter = { userId };
-    if (status && ['pending', 'processing', 'analyzed', 'error'].includes(status)) {
-      filter.status = status;
-    }
+    const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    // Execute query with pagination
     const [offers, total] = await Promise.all([
-      Offer.find(filter)
+      Offer.find(query)
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(limit)
-        .lean({ virtuals: true }),
-      Offer.countDocuments(filter),
+        .limit(parseInt(limit))
+        .lean(),
+      Offer.countDocuments(query),
     ]);
 
     res.status(200).json({
       success: true,
       data: {
-        offers,
+        offers: offers.map((offer) => ({
+          id: offer._id,
+          status: offer.status,
+          originalFile: offer.originalFile,
+          extractedData: offer.extractedData,
+          analysis: offer.analysis,
+          createdAt: offer.createdAt,
+          updatedAt: offer.updatedAt,
+        })),
         pagination: {
           total,
-          page,
-          limit,
-          pages: Math.ceil(total / limit),
-          hasNext: page * limit < total,
-          hasPrev: page > 1,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          pages: Math.ceil(total / parseInt(limit)),
         },
       },
     });
   } catch (error) {
-    logger.error('listOffers error:', error);
+    logger.error('Get offers error:', error.message);
     next(error);
   }
 };
 
 /**
  * GET /api/v1/offers/:id
- * Get a single mortgage offer by ID.
- * Only the owner can access their offer.
- *
- * @param {Object} req - Express request (req.params.id)
- * @param {Object} res - Express response
- * @param {Function} next - Next middleware
+ * Get a specific offer by ID
  */
 const getOffer = async (req, res, next) => {
   try {
-    const userId = req.user.id;
     const { id } = req.params;
+    const userId = req.user.id;
 
-    const offer = await Offer.findOne({ _id: id, userId }).lean({ virtuals: true });
+    const offer = await Offer.findOne({ _id: id, userId }).lean();
 
     if (!offer) {
-      return next(new AppError('Offer not found.', 404));
+      return next(new AppError('Offer not found', 404));
     }
 
     res.status(200).json({
       success: true,
-      data: { offer },
+      data: {
+        id: offer._id,
+        status: offer.status,
+        originalFile: offer.originalFile,
+        extractedData: offer.extractedData,
+        analysis: offer.analysis,
+        createdAt: offer.createdAt,
+        updatedAt: offer.updatedAt,
+      },
     });
   } catch (error) {
-    // Handle invalid MongoDB ObjectId
-    if (error.name === 'CastError') {
-      return next(new AppError('Invalid offer ID.', 400));
-    }
-    logger.error('getOffer error:', error);
+    logger.error('Get offer error:', error.message);
     next(error);
   }
 };
 
 /**
  * DELETE /api/v1/offers/:id
- * Delete a mortgage offer and its associated file from Cloudinary.
- * Only the owner can delete their offer.
- *
- * @param {Object} req - Express request (req.params.id)
- * @param {Object} res - Express response
- * @param {Function} next - Next middleware
+ * Delete a specific offer
  */
 const deleteOffer = async (req, res, next) => {
   try {
-    const userId = req.user.id;
     const { id } = req.params;
+    const userId = req.user.id;
 
-    // Find the offer (need publicId for Cloudinary deletion)
-    const offer = await Offer.findOne({ _id: id, userId });
+    const offer = await Offer.findOneAndDelete({ _id: id, userId });
 
     if (!offer) {
-      return next(new AppError('Offer not found.', 404));
+      return next(new AppError('Offer not found', 404));
     }
-
-    // Delete file from Cloudinary (best-effort — don't fail if Cloudinary is down)
-    if (offer.originalFile && offer.originalFile.publicId) {
-      const resourceType = getCloudinaryResourceType(offer.originalFile.mimetype);
-      try {
-        await deleteFromCloudinary(offer.originalFile.publicId, resourceType);
-      } catch (cloudinaryError) {
-        // Log but don't block deletion
-        logger.warn(
-          `Failed to delete Cloudinary file ${offer.originalFile.publicId}: ${cloudinaryError.message}`
-        );
-      }
-    }
-
-    // Delete from MongoDB
-    await Offer.deleteOne({ _id: id, userId });
 
     logger.info(`Offer ${id} deleted by user ${userId}`);
 
     res.status(200).json({
       success: true,
-      message: 'Offer deleted successfully.',
+      message: 'Offer deleted successfully',
     });
   } catch (error) {
-    if (error.name === 'CastError') {
-      return next(new AppError('Invalid offer ID.', 400));
-    }
-    logger.error('deleteOffer error:', error);
-    next(error);
-  }
-};
-
-/**
- * GET /api/v1/offers/stats
- * Get offer statistics for the authenticated user.
- * Returns counts by status and summary metrics.
- *
- * @param {Object} req - Express request
- * @param {Object} res - Express response
- * @param {Function} next - Next middleware
- */
-const getOfferStats = async (req, res, next) => {
-  try {
-    const userId = req.user.id;
-
-    const stats = await Offer.aggregate([
-      { $match: { userId: require('mongoose').Types.ObjectId.createFromHexString(userId.toString()) } },
-      {
-        $group: {
-          _id: '$status',
-          count: { $sum: 1 },
-        },
-      },
-    ]);
-
-    // Transform to a flat object
-    const statusCounts = {
-      pending: 0,
-      processing: 0,
-      analyzed: 0,
-      error: 0,
-    };
-    stats.forEach(({ _id, count }) => {
-      if (_id in statusCounts) statusCounts[_id] = count;
-    });
-
-    const total = Object.values(statusCounts).reduce((sum, c) => sum + c, 0);
-
-    res.status(200).json({
-      success: true,
-      data: {
-        stats: {
-          total,
-          ...statusCounts,
-        },
-      },
-    });
-  } catch (error) {
-    logger.error('getOfferStats error:', error);
+    logger.error('Delete offer error:', error.message);
     next(error);
   }
 };
 
 module.exports = {
   uploadOffer,
-  listOffers,
+  getOffers,
   getOffer,
   deleteOffer,
-  getOfferStats,
 };

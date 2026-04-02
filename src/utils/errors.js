@@ -1,131 +1,177 @@
 /**
- * Custom Error Classes and Utilities
- * Provides structured error handling throughout the application.
+ * Error Utilities
+ * Custom error classes and global error handlers
  */
+
+const logger = require('./logger');
 
 /**
- * AppError - Custom operational error class.
- * Used for expected errors (validation failures, not found, unauthorized, etc.)
- * that should be returned to the client with a specific HTTP status code.
- *
- * @param {string} message - Human-readable error message
- * @param {number} statusCode - HTTP status code (400, 401, 403, 404, 422, 500, etc.)
- * @param {Array} [details] - Optional array of validation error details
+ * Custom Application Error class
  */
 class AppError extends Error {
-  constructor(message, statusCode = 500, details = null) {
+  constructor(message, statusCode, isOperational) {
     super(message);
-    this.name = 'AppError';
-    this.statusCode = statusCode;
-    this.details = details;
-    this.isOperational = true; // Distinguishes from programming errors
-
-    // Capture stack trace (V8)
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, AppError);
-    }
+    this.statusCode = statusCode || 500;
+    this.isOperational = isOperational !== undefined ? isOperational : true;
+    this.name = this.constructor.name;
+    Error.captureStackTrace(this, this.constructor);
   }
 }
 
 /**
- * Format a Mongoose validation error into AppError details.
- *
- * @param {Object} mongooseError - Mongoose ValidationError
- * @returns {Array} Array of { field, message } objects
+ * Validation Error class
  */
-const formatMongooseValidationError = (mongooseError) => {
-  return Object.values(mongooseError.errors).map((err) => ({
-    field: err.path,
-    message: err.message,
-  }));
+class ValidationError extends AppError {
+  constructor(message, details) {
+    super(message, 422);
+    this.details = details || [];
+  }
+}
+
+/**
+ * Authentication Error class
+ */
+class AuthError extends AppError {
+  constructor(message) {
+    super(message || 'Authentication required', 401);
+  }
+}
+
+/**
+ * Authorization Error class
+ */
+class ForbiddenError extends AppError {
+  constructor(message) {
+    super(message || 'Access forbidden', 403);
+  }
+}
+
+/**
+ * Not Found Error class
+ */
+class NotFoundError extends AppError {
+  constructor(message) {
+    super(message || 'Resource not found', 404);
+  }
+}
+
+/**
+ * Global error handler middleware
+ */
+const errorHandler = (err, req, res, next) => {
+  if (err.statusCode >= 500 || !err.isOperational) {
+    logger.error('Unhandled error:', {
+      message: err.message,
+      stack: err.stack,
+      url: req.url,
+      method: req.method,
+    });
+  } else {
+    logger.warn('Operational error:', {
+      message: err.message,
+      statusCode: err.statusCode,
+      url: req.url,
+    });
+  }
+
+  // Mongoose validation error
+  if (err.name === 'ValidationError') {
+    const details = Object.values(err.errors).map((e) => ({
+      field: e.path,
+      message: e.message,
+    }));
+    return res.status(422).json({
+      success: false,
+      error: 'Validation failed',
+      details,
+    });
+  }
+
+  // Mongoose duplicate key error
+  if (err.code === 11000) {
+    const field = Object.keys(err.keyValue || {})[0] || 'field';
+    return res.status(409).json({
+      success: false,
+      error: `${field} already exists`,
+    });
+  }
+
+  // Mongoose cast error (invalid ObjectId)
+  if (err.name === 'CastError') {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid ID format',
+    });
+  }
+
+  // JWT errors
+  if (err.name === 'JsonWebTokenError') {
+    return res.status(401).json({
+      success: false,
+      error: 'Invalid token',
+    });
+  }
+
+  if (err.name === 'TokenExpiredError') {
+    return res.status(401).json({
+      success: false,
+      error: 'Token expired',
+    });
+  }
+
+  // Multer file size error
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(400).json({
+      success: false,
+      error: 'File too large. Maximum size is 5MB.',
+    });
+  }
+
+  // Validation error with details
+  if (err instanceof ValidationError) {
+    return res.status(err.statusCode).json({
+      success: false,
+      error: err.message,
+      details: err.details,
+    });
+  }
+
+  // Operational errors (known errors)
+  if (err.isOperational) {
+    return res.status(err.statusCode).json({
+      success: false,
+      error: err.message,
+    });
+  }
+
+  // Unknown errors
+  const statusCode = err.statusCode || 500;
+  const message =
+    process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message;
+
+  res.status(statusCode).json({
+    success: false,
+    error: message,
+    ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),
+  });
 };
 
 /**
- * Global error handler middleware for Express.
- * Must be registered LAST in the middleware chain.
- *
- * @param {Error} err - Error object
- * @param {Object} req - Express request
- * @param {Object} res - Express response
- * @param {Function} next - Next middleware (required for Express error handler signature)
+ * 404 Not Found handler
  */
-const globalErrorHandler = (err, req, res, next) => { // eslint-disable-line no-unused-vars
-  const logger = require('./logger');
-
-  // Default to 500 Internal Server Error
-  let statusCode = err.statusCode || 500;
-  let message = err.message || 'Internal Server Error';
-  let details = err.details || null;
-
-  // Handle Mongoose duplicate key error (e.g., duplicate email)
-  if (err.code === 11000) {
-    statusCode = 409;
-    const field = Object.keys(err.keyValue || {})[0] || 'field';
-    message = `A record with this ${field} already exists.`;
-  }
-
-  // Handle Mongoose validation errors
-  if (err.name === 'ValidationError') {
-    statusCode = 422;
-    message = 'Validation failed';
-    details = formatMongooseValidationError(err);
-  }
-
-  // Handle Mongoose CastError (invalid ObjectId)
-  if (err.name === 'CastError') {
-    statusCode = 400;
-    message = `Invalid value for field: ${err.path}`;
-  }
-
-  // Handle JWT errors
-  if (err.name === 'JsonWebTokenError') {
-    statusCode = 401;
-    message = 'Invalid authentication token.';
-  }
-  if (err.name === 'TokenExpiredError') {
-    statusCode = 401;
-    message = 'Authentication token has expired. Please log in again.';
-  }
-
-  // Log server errors (5xx) with full stack trace
-  if (statusCode >= 500) {
-    logger.error(`[${statusCode}] ${message}`, {
-      error: err.message,
-      stack: err.stack,
-      url: req.originalUrl,
-      method: req.method,
-      userId: req.user ? req.user.id : 'unauthenticated',
-    });
-  } else {
-    logger.warn(`[${statusCode}] ${message}`, {
-      url: req.originalUrl,
-      method: req.method,
-    });
-  }
-
-  // Build response
-  const response = {
+const notFoundHandler = (req, res) => {
+  res.status(404).json({
     success: false,
-    error: {
-      message,
-      statusCode,
-    },
-  };
-
-  if (details) {
-    response.error.details = details;
-  }
-
-  // Include stack trace in development only
-  if (process.env.NODE_ENV === 'development') {
-    response.error.stack = err.stack;
-  }
-
-  res.status(statusCode).json(response);
+    error: `Route ${req.method} ${req.url} not found`,
+  });
 };
 
 module.exports = {
   AppError,
-  globalErrorHandler,
-  formatMongooseValidationError,
+  ValidationError,
+  AuthError,
+  ForbiddenError,
+  NotFoundError,
+  errorHandler,
+  notFoundHandler,
 };

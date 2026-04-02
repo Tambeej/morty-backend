@@ -1,76 +1,72 @@
 /**
  * Profile Controller
- * Handles retrieval and update of user financial profiles.
+ * Handles user financial profile operations
  */
 
 const Financial = require('../models/Financial');
-const { AppError } = require('../utils/errors');
 const logger = require('../utils/logger');
+const { AppError } = require('../utils/errors');
 
 /**
- * GET /api/v1/profile/financials
- * Retrieve the authenticated user's financial profile.
- *
- * @param {Object} req - Authenticated request
- * @param {Object} res
- * @param {Function} next
+ * GET /api/v1/profile
  */
 const getFinancials = async (req, res, next) => {
   try {
-    const financial = await Financial.findOne({ userId: req.user.id }).lean({ virtuals: true });
+    const userId = req.user.id;
+    const financial = await Financial.findOne({ userId }).lean();
 
     if (!financial) {
       return res.status(200).json({
         success: true,
-        data: { financial: null },
+        data: null,
         message: 'No financial profile found. Please create one.',
       });
     }
 
     res.status(200).json({
       success: true,
-      data: { financial },
+      data: financial,
     });
   } catch (error) {
-    logger.error('getFinancials error:', error);
+    logger.error('Get financials error:', error.message);
     next(error);
   }
 };
 
 /**
- * PUT /api/v1/profile/financials
- * Create or update the authenticated user's financial profile.
- * Uses upsert to handle both create and update in one operation.
- *
- * @param {Object} req - Authenticated request with validated body
- * @param {Object} res
- * @param {Function} next
+ * PUT /api/v1/profile
  */
 const upsertFinancials = async (req, res, next) => {
   try {
-    const { income, expenses, assets, debts } = req.body;
     const userId = req.user.id;
+    const { income, expenses, assets, debts } = req.body;
 
     const financial = await Financial.findOneAndUpdate(
       { userId },
-      { income, expenses, assets, debts, updatedAt: new Date() },
       {
-        new: true, // Return updated document
-        upsert: true, // Create if doesn't exist
+        userId,
+        income,
+        expenses: expenses || {},
+        assets: assets || {},
+        debts: debts || [],
+        updatedAt: new Date(),
+      },
+      {
+        new: true,
+        upsert: true,
         runValidators: true,
-        setDefaultsOnInsert: true,
       }
-    ).lean({ virtuals: true });
+    );
 
-    logger.info(`Financial profile updated for user ${userId}`);
+    logger.info(`Financial profile updated for user: ${userId}`);
 
     res.status(200).json({
       success: true,
-      message: 'Financial profile saved successfully.',
-      data: { financial },
+      data: financial,
+      message: 'Financial profile updated successfully',
     });
   } catch (error) {
-    logger.error('upsertFinancials error:', error);
+    logger.error('Upsert financials error:', error.message);
     next(error);
   }
 };

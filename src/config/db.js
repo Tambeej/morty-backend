@@ -1,36 +1,31 @@
 /**
  * Database Configuration
- * Establishes and manages the MongoDB connection via Mongoose.
+ * MongoDB connection via Mongoose
  */
 
 const mongoose = require('mongoose');
 const logger = require('../utils/logger');
 
 /**
- * Connect to MongoDB Atlas.
- * Uses the MONGODB_URI environment variable.
- *
- * @returns {Promise<void>}
+ * Connect to MongoDB
  */
 const connectDB = async () => {
-  const uri = process.env.MONGODB_URI;
+  const mongoUri = process.env.MONGODB_URI;
 
-  if (!uri) {
-    throw new Error('MONGODB_URI environment variable is not set.');
+  if (!mongoUri) {
+    throw new Error('MONGODB_URI environment variable is not set');
   }
 
   try {
-    const conn = await mongoose.connect(uri, {
-      // Mongoose 7+ uses these defaults, but explicit for clarity
-      serverSelectionTimeoutMS: 5000, // Fail fast if DB is unreachable
+    const conn = await mongoose.connect(mongoUri, {
+      serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 45000,
     });
 
     logger.info(`MongoDB connected: ${conn.connection.host}`);
 
-    // Handle connection events
     mongoose.connection.on('error', (err) => {
-      logger.error('MongoDB connection error:', err);
+      logger.error('MongoDB connection error:', err.message);
     });
 
     mongoose.connection.on('disconnected', () => {
@@ -38,8 +33,10 @@ const connectDB = async () => {
     });
 
     mongoose.connection.on('reconnected', () => {
-      logger.info('MongoDB reconnected.');
+      logger.info('MongoDB reconnected');
     });
+
+    return conn;
   } catch (error) {
     logger.error('MongoDB connection failed:', error.message);
     throw error;

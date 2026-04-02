@@ -1,60 +1,56 @@
 /**
  * Authentication Middleware
- * JWT-based authentication guard for protected routes.
+ * JWT token verification for protected routes
  */
 
 const jwt = require('jsonwebtoken');
-const { AppError } = require('../utils/errors');
+const User = require('../models/User');
+const { AuthError } = require('../utils/errors');
 const logger = require('../utils/logger');
 
 /**
- * Extract JWT token from the Authorization header.
- * Supports 'Bearer <token>' format.
- *
- * @param {Object} req - Express request
- * @returns {string|null} Token string or null
+ * Verify JWT token and attach user to request
  */
-const extractToken = (req) => {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    return authHeader.slice(7);
-  }
-  return null;
-};
-
-/**
- * authenticate middleware
- * Verifies the JWT access token and attaches the decoded user to req.user.
- *
- * @param {Object} req - Express request
- * @param {Object} res - Express response
- * @param {Function} next - Next middleware
- */
-const authenticate = (req, res, next) => {
-  const token = extractToken(req);
-
-  if (!token) {
-    return next(new AppError('Authentication required. Please provide a valid Bearer token.', 401));
-  }
-
+const authMiddleware = async (req, res, next) => {
   try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return next(new AuthError('No token provided'));
+    }
+
+    const token = authHeader.split(' ')[1];
+
+    if (!token) {
+      return next(new AuthError('No token provided'));
+    }
+
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    // Attach user info to request for downstream use
+
+    const user = await User.findById(decoded.id).select('-password -refreshToken').lean();
+
+    if (!user) {
+      return next(new AuthError('User no longer exists'));
+    }
+
     req.user = {
-      id: decoded.id,
-      email: decoded.email,
+      id: user._id.toString(),
+      email: user.email,
+      phone: user.phone,
+      verified: user.verified,
     };
+
     next();
   } catch (error) {
-    if (error.name === 'TokenExpiredError') {
-      return next(new AppError('Authentication token has expired. Please log in again.', 401));
-    }
     if (error.name === 'JsonWebTokenError') {
-      return next(new AppError('Invalid authentication token.', 401));
+      return next(new AuthError('Invalid token'));
     }
-    logger.error('JWT verification error:', error);
-    return next(new AppError('Authentication failed.', 401));
+    if (error.name === 'TokenExpiredError') {
+      return next(new AuthError('Token expired'));
+    }
+    logger.error('Auth middleware error:', error.message);
+    next(error);
   }
 };
 
-module.exports = { authenticate };
+module.exports = authMiddleware;

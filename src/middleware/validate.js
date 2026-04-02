@@ -1,122 +1,87 @@
 /**
  * Validation Middleware
- * Joi-based request validation for all API endpoints.
- * Provides consistent error formatting for validation failures.
+ * Joi-based request validation
  */
 
 const Joi = require('joi');
-const { AppError } = require('../utils/errors');
+const { ValidationError } = require('../utils/errors');
 
 /**
- * Generic validation factory.
- * Creates a middleware that validates req.body against a Joi schema.
- *
- * @param {Object} schema - Joi schema object
+ * Create validation middleware for a given Joi schema
+ * @param {Object} schema - Joi validation schema
+ * @param {string} source - Request property to validate ('body', 'query', 'params')
  * @returns {Function} Express middleware
  */
-const validate = (schema) => (req, res, next) => {
-  const { error, value } = schema.validate(req.body, {
-    abortEarly: false, // Return all errors, not just the first
-    stripUnknown: true, // Remove unknown fields
-    convert: true, // Type coercion (e.g., string '123' → number 123)
-  });
+const validate = (schema, source) => {
+  const src = source || 'body';
+  return (req, res, next) => {
+    const { error, value } = schema.validate(req[src], {
+      abortEarly: false,
+      stripUnknown: true,
+      convert: true,
+    });
 
-  if (error) {
-    const details = error.details.map((d) => ({
-      field: d.path.join('.'),
-      message: d.message.replace(/"/g, ''),
-    }));
-    return next(new AppError('Validation failed', 422, details));
-  }
+    if (error) {
+      const details = error.details.map((d) => ({
+        field: d.path.join('.'),
+        message: d.message.replace(/"/g, ''),
+      }));
 
-  // Replace req.body with sanitized/coerced values
-  req.body = value;
-  next();
+      return next(new ValidationError('Validation failed', details));
+    }
+
+    req[src] = value;
+    next();
+  };
 };
 
-// ─── Auth Schemas ────────────────────────────────────────────────────────────
+// ─── Validation Schemas ──────────────────────────────────────────────────────
 
-/**
- * POST /api/v1/auth/register
- */
-const registerSchema = Joi.object({
-  email: Joi.string().email().lowercase().trim().required().messages({
-    'string.email': 'Please provide a valid email address',
-    'any.required': 'Email is required',
+const schemas = {
+  register: Joi.object({
+    email: Joi.string().email().lowercase().trim().required(),
+    password: Joi.string().min(8).max(128).required(),
+    phone: Joi.string()
+      .pattern(/^(\+972|0)[0-9]{8,9}$/)
+      .optional()
+      .allow(''),
   }),
-  password: Joi.string().min(8).max(128).required().messages({
-    'string.min': 'Password must be at least 8 characters',
-    'any.required': 'Password is required',
+
+  login: Joi.object({
+    email: Joi.string().email().lowercase().trim().required(),
+    password: Joi.string().required(),
   }),
-  phone: Joi.string()
-    .pattern(/^(\+972|0)[0-9]{8,9}$/)
-    .optional()
-    .messages({
-      'string.pattern.base': 'Phone must be a valid Israeli number (e.g., +972501234567 or 0501234567)',
-    }),
-});
 
-/**
- * POST /api/v1/auth/login
- */
-const loginSchema = Joi.object({
-  email: Joi.string().email().lowercase().trim().required().messages({
-    'string.email': 'Please provide a valid email address',
-    'any.required': 'Email is required',
+  refreshToken: Joi.object({
+    refreshToken: Joi.string().required(),
   }),
-  password: Joi.string().required().messages({
-    'any.required': 'Password is required',
+
+  financials: Joi.object({
+    income: Joi.number().min(0).max(10000000).required(),
+    expenses: Joi.object({
+      housing: Joi.number().min(0).max(1000000).default(0),
+      loans: Joi.number().min(0).max(1000000).default(0),
+      other: Joi.number().min(0).max(1000000).default(0),
+    }).default({}),
+    assets: Joi.object({
+      savings: Joi.number().min(0).max(100000000).default(0),
+      investments: Joi.number().min(0).max(100000000).default(0),
+    }).default({}),
+    debts: Joi.array()
+      .items(
+        Joi.object({
+          type: Joi.string().max(100).required(),
+          amount: Joi.number().min(0).required(),
+        })
+      )
+      .default([]),
   }),
-});
 
-// ─── Financial Profile Schemas ────────────────────────────────────────────────
-
-/**
- * PUT /api/v1/profile/financials
- */
-const financialsSchema = Joi.object({
-  income: Joi.number().min(0).max(10000000).required().messages({
-    'number.min': 'Income cannot be negative',
-    'any.required': 'Monthly income is required',
+  pagination: Joi.object({
+    page: Joi.number().integer().min(1).default(1),
+    limit: Joi.number().integer().min(1).max(100).default(10),
+    status: Joi.string().valid('pending', 'analyzed', 'error').optional(),
   }),
-  expenses: Joi.object({
-    housing: Joi.number().min(0).max(10000000).default(0),
-    loans: Joi.number().min(0).max(10000000).default(0),
-    other: Joi.number().min(0).max(10000000).default(0),
-  }).default({}),
-  assets: Joi.object({
-    savings: Joi.number().min(0).max(100000000).default(0),
-    investments: Joi.number().min(0).max(100000000).default(0),
-  }).default({}),
-  debts: Joi.array()
-    .items(
-      Joi.object({
-        type: Joi.string().trim().max(100).required(),
-        amount: Joi.number().min(0).max(100000000).required(),
-      })
-    )
-    .max(20)
-    .default([]),
-});
-
-// ─── Offer Upload Schema ──────────────────────────────────────────────────────
-
-/**
- * POST /api/v1/offers
- * Validates optional body fields alongside the file upload.
- * The file itself is validated by Multer middleware.
- */
-const offerUploadSchema = Joi.object({
-  bankName: Joi.string().trim().max(100).optional().allow('').messages({
-    'string.max': 'Bank name cannot exceed 100 characters',
-  }),
-});
-
-// ─── Exported Middleware ──────────────────────────────────────────────────────
-
-module.exports = {
-  validateRegister: validate(registerSchema),
-  validateLogin: validate(loginSchema),
-  validateFinancials: validate(financialsSchema),
-  validateOfferUpload: validate(offerUploadSchema),
 };
+
+module.exports = { validate, schemas };

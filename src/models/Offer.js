@@ -1,10 +1,20 @@
 /**
  * Offer Model
- * Represents a mortgage offer uploaded by a user.
- * Stores file metadata, extracted OCR data, and AI analysis results.
+ * Represents a mortgage offer uploaded by a user
  */
 
 const mongoose = require('mongoose');
+
+const recommendationSchema = new mongoose.Schema(
+  {
+    priority: { type: Number },
+    type: { type: String },
+    title: { type: String },
+    description: { type: String },
+    potentialSavings: { type: Number, default: null },
+  },
+  { _id: false }
+);
 
 const offerSchema = new mongoose.Schema(
   {
@@ -14,106 +24,57 @@ const offerSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
-
-    /**
-     * Original uploaded file metadata
-     */
     originalFile: {
-      url: {
-        type: String,
-        required: true,
-      },
-      publicId: {
-        // Cloudinary public_id for deletion
-        type: String,
-        default: null,
-      },
-      mimetype: {
-        type: String,
-        required: true,
-        enum: ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg'],
-      },
-      originalName: {
-        type: String,
-        required: true,
-      },
-      size: {
-        type: Number, // bytes
-        required: true,
-      },
+      url: { type: String, required: true },
+      mimetype: { type: String, required: true },
+      originalName: { type: String },
+      size: { type: Number },
+      publicId: { type: String },
     },
-
-    /**
-     * Data extracted via OCR / AI from the uploaded file
-     */
     extractedData: {
       bank: { type: String, default: null },
-      amount: { type: Number, default: null }, // ILS
-      rate: { type: Number, default: null }, // annual interest rate %
-      term: { type: Number, default: null }, // months
-      monthlyPayment: { type: Number, default: null }, // ILS
-      rawText: { type: String, default: null }, // full OCR text
+      amount: { type: Number, default: null },
+      rate: { type: Number, default: null },
+      term: { type: Number, default: null },
+      monthlyPayment: { type: Number, default: null },
+      loanType: { type: String, default: null },
+      currency: { type: String, default: 'ILS' },
+      additionalFees: { type: String, default: null },
+      conditions: { type: String, default: null },
     },
-
-    /**
-     * AI-generated analysis and recommendations
-     */
     analysis: {
       recommendedRate: { type: Number, default: null },
-      savings: { type: Number, default: null }, // lifetime savings in ILS
+      savings: { type: Number, default: 0 },
       aiReasoning: { type: String, default: null },
-      recommendations: [{ type: String }],
+      monthlyPayment: { type: Number, default: null },
+      totalCost: { type: Number, default: null },
+      totalInterest: { type: Number, default: null },
+      marketAverageRate: { type: Number, default: null },
+      rateVsMarket: { type: Number, default: null },
+      debtToIncomeRatio: { type: Number, default: null },
+      affordabilityScore: { type: Number, default: null },
+      recommendations: [recommendationSchema],
+      analysisSource: {
+        type: String,
+        enum: ['openai', 'algorithmic', 'mock'],
+        default: null,
+      },
+      analyzedAt: { type: Date, default: null },
     },
-
-    /**
-     * Processing status of the offer
-     */
     status: {
       type: String,
-      enum: ['pending', 'processing', 'analyzed', 'error'],
+      enum: ['pending', 'analyzed', 'error'],
       default: 'pending',
-    },
-
-    /**
-     * Error message if processing failed
-     */
-    errorMessage: {
-      type: String,
-      default: null,
+      index: true,
     },
   },
   {
-    timestamps: true, // adds createdAt and updatedAt
+    timestamps: true,
   }
 );
 
-// Compound index for efficient user-specific queries
+// Compound indexes for efficient queries
 offerSchema.index({ userId: 1, createdAt: -1 });
 offerSchema.index({ userId: 1, status: 1 });
-
-/**
- * Virtual: human-readable file size
- */
-offerSchema.virtual('fileSizeFormatted').get(function () {
-  const bytes = this.originalFile.size;
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-});
-
-/**
- * Transform output: remove internal fields from JSON responses
- */
-offerSchema.set('toJSON', {
-  virtuals: true,
-  transform: (doc, ret) => {
-    delete ret.__v;
-    // Remove Cloudinary publicId from client responses
-    if (ret.originalFile) {
-      delete ret.originalFile.publicId;
-    }
-    return ret;
-  },
-});
 
 module.exports = mongoose.model('Offer', offerSchema);

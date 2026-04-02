@@ -1,6 +1,6 @@
 /**
  * User Model
- * Represents an authenticated user of the Morty platform.
+ * Represents an authenticated user in the system
  */
 
 const mongoose = require('mongoose');
@@ -14,18 +14,18 @@ const userSchema = new mongoose.Schema(
       unique: true,
       lowercase: true,
       trim: true,
-      match: [/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Please provide a valid email address'],
+      match: [/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Please provide a valid email'],
     },
     password: {
       type: String,
       required: [true, 'Password is required'],
       minlength: [8, 'Password must be at least 8 characters'],
-      select: false, // Never return password in queries by default
+      select: false,
     },
     phone: {
       type: String,
+      trim: true,
       match: [/^(\+972|0)[0-9]{8,9}$/, 'Please provide a valid Israeli phone number'],
-      default: null,
     },
     verified: {
       type: Boolean,
@@ -33,7 +33,6 @@ const userSchema = new mongoose.Schema(
     },
     refreshToken: {
       type: String,
-      default: null,
       select: false,
     },
   },
@@ -42,36 +41,27 @@ const userSchema = new mongoose.Schema(
   }
 );
 
-/**
- * Pre-save hook: hash password before saving.
- */
 userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
-  const salt = await bcrypt.genSalt(12);
-  this.password = await bcrypt.hash(this.password, salt);
-  next();
+
+  try {
+    const salt = await bcrypt.genSalt(12);
+    this.password = await bcrypt.hash(this.password, salt);
+    next();
+  } catch (error) {
+    next(error);
+  }
 });
 
-/**
- * Instance method: compare plain password with hashed password.
- *
- * @param {string} candidatePassword - Plain text password to compare
- * @returns {Promise<boolean>}
- */
 userSchema.methods.comparePassword = async function (candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
 };
 
-/**
- * Transform output: remove sensitive fields from JSON responses.
- */
-userSchema.set('toJSON', {
-  transform: (doc, ret) => {
-    delete ret.password;
-    delete ret.refreshToken;
-    delete ret.__v;
-    return ret;
-  },
-});
+userSchema.methods.toJSON = function () {
+  const obj = this.toObject();
+  delete obj.password;
+  delete obj.refreshToken;
+  return obj;
+};
 
 module.exports = mongoose.model('User', userSchema);

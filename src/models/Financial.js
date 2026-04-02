@@ -1,7 +1,6 @@
 /**
  * Financial Model
- * Stores a user's financial profile used for mortgage analysis.
- * One document per user (upserted on update).
+ * Stores user financial profile data
  */
 
 const mongoose = require('mongoose');
@@ -12,7 +11,7 @@ const financialSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
-      unique: true, // One financial profile per user
+      unique: true,
       index: true,
     },
     income: {
@@ -31,45 +30,18 @@ const financialSchema = new mongoose.Schema(
     },
     debts: [
       {
-        type: { type: String, required: true, trim: true },
+        type: { type: String, required: true },
         amount: { type: Number, required: true, min: 0 },
       },
     ],
+    updatedAt: {
+      type: Date,
+      default: Date.now,
+    },
   },
   {
     timestamps: true,
   }
 );
-
-/**
- * Virtual: total monthly expenses
- */
-financialSchema.virtual('totalExpenses').get(function () {
-  const { housing = 0, loans = 0, other = 0 } = this.expenses;
-  return housing + loans + other;
-});
-
-/**
- * Virtual: total assets
- */
-financialSchema.virtual('totalAssets').get(function () {
-  const { savings = 0, investments = 0 } = this.assets;
-  return savings + investments;
-});
-
-/**
- * Virtual: total debt amount
- */
-financialSchema.virtual('totalDebt').get(function () {
-  return this.debts.reduce((sum, d) => sum + d.amount, 0);
-});
-
-financialSchema.set('toJSON', {
-  virtuals: true,
-  transform: (doc, ret) => {
-    delete ret.__v;
-    return ret;
-  },
-});
 
 module.exports = mongoose.model('Financial', financialSchema);

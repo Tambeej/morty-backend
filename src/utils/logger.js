@@ -1,51 +1,59 @@
 /**
  * Logger Utility
- * Winston-based structured logging for the application.
- * Outputs JSON in production, colorized text in development.
+ * Winston-based structured logging
  */
 
 const winston = require('winston');
 
-const { combine, timestamp, printf, colorize, errors, json } = winston.format;
+const { combine, timestamp, printf, colorize, errors } = winston.format;
 
-/**
- * Custom log format for development: colorized, human-readable.
- */
-const devFormat = combine(
-  colorize({ all: true }),
-  timestamp({ format: 'HH:mm:ss' }),
-  errors({ stack: true }),
-  printf(({ level, message, timestamp: ts, stack, ...meta }) => {
-    let log = `${ts} [${level}]: ${message}`;
-    if (Object.keys(meta).length > 0) {
-      log += ` ${JSON.stringify(meta)}`;
-    }
-    if (stack) {
-      log += `\n${stack}`;
-    }
-    return log;
-  })
-);
-
-/**
- * Production format: structured JSON for log aggregation.
- */
-const prodFormat = combine(
-  timestamp(),
-  errors({ stack: true }),
-  json()
-);
-
-const isProduction = process.env.NODE_ENV === 'production';
+const logFormat = printf(({ level, message, timestamp: ts, stack }) => {
+  let log = `${ts} [${level.toUpperCase()}]: ${message}`;
+  if (stack) {
+    log += `\n${stack}`;
+  }
+  return log;
+});
 
 const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || (isProduction ? 'info' : 'debug'),
-  format: isProduction ? prodFormat : devFormat,
+  level: process.env.LOG_LEVEL || 'info',
+  format: combine(
+    timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+    errors({ stack: true }),
+    logFormat
+  ),
   transports: [
-    new winston.transports.Console(),
+    new winston.transports.Console({
+      format: combine(
+        colorize(),
+        timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+        errors({ stack: true }),
+        logFormat
+      ),
+    }),
   ],
-  // Don't exit on uncaught exceptions — let the process manager handle it
-  exitOnError: false,
 });
+
+if (process.env.NODE_ENV === 'production') {
+  const fs = require('fs');
+  if (!fs.existsSync('logs')) {
+    fs.mkdirSync('logs', { recursive: true });
+  }
+  logger.add(
+    new winston.transports.File({
+      filename: 'logs/error.log',
+      level: 'error',
+      maxsize: 5242880,
+      maxFiles: 5,
+    })
+  );
+  logger.add(
+    new winston.transports.File({
+      filename: 'logs/combined.log',
+      maxsize: 5242880,
+      maxFiles: 5,
+    })
+  );
+}
 
 module.exports = logger;

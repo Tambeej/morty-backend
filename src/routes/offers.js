@@ -1,77 +1,79 @@
 /**
  * Offers Routes
- * Handles mortgage offer file upload and management endpoints.
- *
- * All routes require JWT authentication.
- *
- * Routes:
- *   POST   /api/v1/offers          - Upload a new mortgage offer
- *   GET    /api/v1/offers          - List all offers for the user
- *   GET    /api/v1/offers/stats    - Get offer statistics
- *   GET    /api/v1/offers/:id      - Get a single offer
- *   DELETE /api/v1/offers/:id      - Delete an offer
+ * Handles mortgage offer file upload and retrieval
  */
 
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const { uploadOffer, getOffers, getOffer, deleteOffer } = require('../controllers/offersController');
+const authMiddleware = require('../middleware/auth');
+const { AppError } = require('../utils/errors');
 
-const { authenticate } = require('../middleware/auth');
-const { uploadSingle, requireFile } = require('../middleware/upload');
-const {
-  uploadOffer,
-  listOffers,
-  getOffer,
-  deleteOffer,
-  getOfferStats,
-} = require('../controllers/offersController');
-const { validateOfferUpload } = require('../middleware/validate');
+// Ensure uploads directory exists
+const uploadsDir = process.env.UPLOAD_DIR || 'uploads';
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadsDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    cb(null, `${uniqueSuffix}${path.extname(file.originalname)}`);
+  },
+});
+
+const fileFilter = (req, file, cb) => {
+  const allowedTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg'];
+  if (allowedTypes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new AppError('Invalid file type. Only PDF, PNG, and JPG are allowed.', 400), false);
+  }
+};
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit
+  },
+});
+
+// All offer routes require authentication
+router.use(authMiddleware);
 
 /**
- * All routes in this router require authentication.
+ * @route   POST /api/v1/offers
+ * @desc    Upload a mortgage offer document
+ * @access  Private
  */
-router.use(authenticate);
+router.post('/', upload.single('file'), uploadOffer);
 
 /**
- * POST /api/v1/offers
- * Upload a new mortgage offer file.
- *
- * Middleware chain:
- *   1. uploadSingle  - Multer: parse multipart/form-data, validate file type/size
- *   2. requireFile   - Ensure a file was actually provided
- *   3. validateOfferUpload - Joi: validate optional body fields (bankName)
- *   4. uploadOffer   - Controller: upload to Cloudinary, save to DB
+ * @route   GET /api/v1/offers
+ * @desc    Get all offers for the authenticated user
+ * @access  Private
  */
-router.post(
-  '/',
-  uploadSingle,
-  requireFile,
-  validateOfferUpload,
-  uploadOffer
-);
+router.get('/', getOffers);
 
 /**
- * GET /api/v1/offers/stats
- * Get offer statistics for the authenticated user.
- * Must be defined BEFORE /:id to avoid 'stats' being treated as an ID.
- */
-router.get('/stats', getOfferStats);
-
-/**
- * GET /api/v1/offers
- * List all mortgage offers for the authenticated user.
- * Supports pagination and status filtering.
- */
-router.get('/', listOffers);
-
-/**
- * GET /api/v1/offers/:id
- * Get a single mortgage offer by ID.
+ * @route   GET /api/v1/offers/:id
+ * @desc    Get a specific offer by ID
+ * @access  Private
  */
 router.get('/:id', getOffer);
 
 /**
- * DELETE /api/v1/offers/:id
- * Delete a mortgage offer and its associated Cloudinary file.
+ * @route   DELETE /api/v1/offers/:id
+ * @desc    Delete a specific offer
+ * @access  Private
  */
 router.delete('/:id', deleteOffer);
 

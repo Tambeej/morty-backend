@@ -1,9 +1,6 @@
 /**
- * Morty Backend - Server Entry Point
- * Node.js/Express REST API for AI-powered mortgage analysis.
- *
- * Middleware stack (in order):
- *   cors → helmet → rateLimit → morgan → json → routes → errorHandler
+ * Morty Backend - Main Server Entry Point
+ * AI-powered mortgage analysis platform for Israeli users
  */
 
 require('dotenv').config();
@@ -12,134 +9,132 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
-const rateLimit = require('express-rate-limit');
+const path = require('path');
+const fs = require('fs');
 
 const connectDB = require('./config/db');
-const { verifyCloudinaryConfig } = require('./config/cloudinary');
-const { globalErrorHandler } = require('./utils/errors');
 const logger = require('./utils/logger');
+const { errorHandler, notFoundHandler } = require('./utils/errors');
+const { apiLimiter, authLimiter } = require('./middleware/rateLimit');
 
 // Route imports
 const authRoutes = require('./routes/auth');
 const profileRoutes = require('./routes/profile');
 const offersRoutes = require('./routes/offers');
+const analysisRoutes = require('./routes/analysis');
+const dashboardRoutes = require('./routes/dashboard');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// ─── Security Middleware ──────────────────────────────────────────────────────
+// Ensure uploads directory exists
+const uploadsDir = process.env.UPLOAD_DIR || 'uploads';
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
 
-/**
- * Helmet: sets security-related HTTP headers.
- */
-app.use(helmet());
+// ─── Middleware Stack ────────────────────────────────────────────────────────
 
-/**
- * CORS: allow requests from the frontend origin.
- */
-const allowedOrigins = [
-  process.env.FRONTEND_URL || 'http://localhost:3000',
-  'https://tambeej.github.io', // GitHub Pages deployment
-];
+// CORS configuration
+const corsOptions = {
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      process.env.FRONTEND_URL || 'http://localhost:3000',
+      'https://tambeej.github.io',
+      'http://localhost:5173',
+      'http://localhost:3000',
+    ];
 
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+};
+
+app.use(cors(corsOptions));
+
+// Security headers
 app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (e.g., mobile apps, curl, Postman)
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      callback(new Error(`CORS policy: origin ${origin} is not allowed`));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    contentSecurityPolicy: false,
   })
 );
 
-/**
- * Global rate limiter: 100 requests per 15 minutes per IP.
- */
-const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    success: false,
-    error: { message: 'Too many requests. Please try again later.', statusCode: 429 },
-  },
-});
-app.use(globalLimiter);
+// Rate limiting
+app.use('/api/', apiLimiter);
+app.use('/api/v1/auth/', authLimiter);
 
-// ─── Request Logging ──────────────────────────────────────────────────────────
-
+// Request logging
 app.use(
   morgan('combined', {
     stream: { write: (message) => logger.info(message.trim()) },
-    skip: (req) => req.url === '/health', // Don't log health checks
   })
 );
 
-// ─── Body Parsing ─────────────────────────────────────────────────────────────
+// Body parsing
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-app.use(express.json({ limit: '10kb' })); // Limit JSON body size
-app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+// Serve uploaded files statically
+app.use('/uploads', express.static(path.join(process.cwd(), uploadsDir)));
 
-// ─── Health Check ─────────────────────────────────────────────────────────────
+// ─── Routes ─────────────────────────────────────────────────────────────────
 
+// Health check
 app.get('/health', (req, res) => {
   res.status(200).json({
-    success: true,
-    status: 'healthy',
+    status: 'ok',
     timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
     environment: process.env.NODE_ENV || 'development',
   });
 });
 
-// ─── API Routes ───────────────────────────────────────────────────────────────
-
+// API v1 routes
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/profile', profileRoutes);
 app.use('/api/v1/offers', offersRoutes);
+app.use('/api/v1/analysis', analysisRoutes);
+app.use('/api/v1/dashboard', dashboardRoutes);
 
-/**
- * 404 handler for unmatched routes.
- */
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    error: {
-      message: `Route not found: ${req.method} ${req.originalUrl}`,
-      statusCode: 404,
-    },
-  });
-});
+// ─── Error Handling ──────────────────────────────────────────────────────────
 
-// ─── Global Error Handler ─────────────────────────────────────────────────────
+app.use(notFoundHandler);
+app.use(errorHandler);
 
-app.use(globalErrorHandler);
-
-// ─── Start Server ─────────────────────────────────────────────────────────────
+// ─── Server Start ────────────────────────────────────────────────────────────
 
 const startServer = async () => {
   try {
-    // Connect to MongoDB
     await connectDB();
 
-    // Verify Cloudinary configuration (non-blocking warning)
-    verifyCloudinaryConfig();
-
     app.listen(PORT, () => {
-      logger.info(`🚀 Morty backend running on port ${PORT}`);
-      logger.info(`   Environment: ${process.env.NODE_ENV || 'development'}`);
-      logger.info(`   API base: http://localhost:${PORT}/api/v1`);
+      logger.info(`Morty Backend running on port ${PORT}`);
+      logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+      logger.info(`API Base: http://localhost:${PORT}/api/v1`);
     });
   } catch (error) {
-    logger.error('Failed to start server:', error);
+    logger.error('Failed to start server:', error.message);
     process.exit(1);
   }
 };
 
+process.on('unhandledRejection', (err) => {
+  logger.error('Unhandled Promise Rejection:', err.message);
+  process.exit(1);
+});
+
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught Exception:', err.message);
+  process.exit(1);
+});
+
 startServer();
 
-module.exports = app; // Export for testing
+module.exports = app;
