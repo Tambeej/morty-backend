@@ -2,54 +2,47 @@
  * Auth Routes
  * Handles user registration, login, token refresh, and logout.
  *
- * Base path: /api/v1/auth
+ * Routes:
+ *   POST /api/v1/auth/register  - Register a new user
+ *   POST /api/v1/auth/login     - Login and receive tokens
+ *   POST /api/v1/auth/refresh   - Refresh access token
+ *   POST /api/v1/auth/logout    - Invalidate refresh token
  */
 
 const express = require('express');
 const router = express.Router();
+const rateLimit = require('express-rate-limit');
+
+const { validateRegister, validateLogin } = require('../middleware/validate');
+const { authenticate } = require('../middleware/auth');
 const {
   register,
   login,
   refreshToken,
   logout,
-  getMe,
 } = require('../controllers/authController');
-const authMiddleware = require('../middleware/auth');
-const authRateLimiter = require('../middleware/rateLimit');
 
 /**
- * @route   POST /api/v1/auth/register
- * @desc    Register a new user
- * @access  Public
+ * Stricter rate limit for auth endpoints to prevent brute-force attacks.
+ * 10 requests per 15 minutes per IP.
  */
-router.post('/register', authRateLimiter, register);
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: {
+      message: 'Too many authentication attempts. Please try again in 15 minutes.',
+      statusCode: 429,
+    },
+  },
+});
 
-/**
- * @route   POST /api/v1/auth/login
- * @desc    Authenticate user and return JWT tokens
- * @access  Public
- */
-router.post('/login', authRateLimiter, login);
-
-/**
- * @route   POST /api/v1/auth/refresh
- * @desc    Refresh access token using refresh token
- * @access  Public
- */
+router.post('/register', authLimiter, validateRegister, register);
+router.post('/login', authLimiter, validateLogin, login);
 router.post('/refresh', refreshToken);
-
-/**
- * @route   POST /api/v1/auth/logout
- * @desc    Invalidate refresh token
- * @access  Private
- */
-router.post('/logout', authMiddleware, logout);
-
-/**
- * @route   GET /api/v1/auth/me
- * @desc    Get current authenticated user info
- * @access  Private
- */
-router.get('/me', authMiddleware, getMe);
+router.post('/logout', authenticate, logout);
 
 module.exports = router;

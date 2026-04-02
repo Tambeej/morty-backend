@@ -1,214 +1,119 @@
 /**
  * Offer Model
- * Stores mortgage offer documents uploaded by users.
- * Tracks file metadata, OCR-extracted data, and AI analysis results.
+ * Represents a mortgage offer uploaded by a user.
+ * Stores file metadata, extracted OCR data, and AI analysis results.
  */
 
 const mongoose = require('mongoose');
 
-/**
- * Offer Schema
- * @typedef {Object} Offer
- * @property {ObjectId} userId - Reference to the User document
- * @property {Object} originalFile - Uploaded file metadata
- * @property {Object} extractedData - OCR-extracted mortgage terms
- * @property {Object} analysis - AI analysis results and recommendations
- * @property {string} status - Processing status
- */
 const offerSchema = new mongoose.Schema(
   {
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      required: [true, 'User ID is required'],
+      required: true,
       index: true,
     },
+
+    /**
+     * Original uploaded file metadata
+     */
     originalFile: {
       url: {
         type: String,
-        required: [true, 'File URL is required'],
-        trim: true,
+        required: true,
       },
       publicId: {
+        // Cloudinary public_id for deletion
         type: String,
-        trim: true,
-        comment: 'Cloudinary public ID for file management',
-      },
-      filename: {
-        type: String,
-        trim: true,
+        default: null,
       },
       mimetype: {
         type: String,
+        required: true,
         enum: ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg'],
-        required: [true, 'File MIME type is required'],
+      },
+      originalName: {
+        type: String,
+        required: true,
       },
       size: {
-        type: Number,
-        min: 0,
-        comment: 'File size in bytes',
+        type: Number, // bytes
+        required: true,
       },
     },
+
+    /**
+     * Data extracted via OCR / AI from the uploaded file
+     */
     extractedData: {
-      bank: {
-        type: String,
-        trim: true,
-        default: null,
-        comment: 'Bank name extracted from document',
-      },
-      amount: {
-        type: Number,
-        min: 0,
-        default: null,
-        comment: 'Mortgage amount in ILS',
-      },
-      rate: {
-        type: Number,
-        min: 0,
-        max: 100,
-        default: null,
-        comment: 'Annual interest rate percentage',
-      },
-      term: {
-        type: Number,
-        min: 1,
-        max: 50,
-        default: null,
-        comment: 'Loan term in years',
-      },
-      monthlyPayment: {
-        type: Number,
-        min: 0,
-        default: null,
-        comment: 'Calculated monthly payment in ILS',
-      },
-      rawOcrText: {
-        type: String,
-        select: false,
-        comment: 'Raw OCR text output (not returned by default)',
-      },
-      confidence: {
-        type: Number,
-        min: 0,
-        max: 1,
-        default: null,
-        comment: 'OCR confidence score (0-1)',
-      },
+      bank: { type: String, default: null },
+      amount: { type: Number, default: null }, // ILS
+      rate: { type: Number, default: null }, // annual interest rate %
+      term: { type: Number, default: null }, // months
+      monthlyPayment: { type: Number, default: null }, // ILS
+      rawText: { type: String, default: null }, // full OCR text
     },
+
+    /**
+     * AI-generated analysis and recommendations
+     */
     analysis: {
-      recommendedRate: {
-        type: Number,
-        min: 0,
-        max: 100,
-        default: null,
-        comment: 'AI-recommended optimal interest rate',
-      },
-      savings: {
-        type: Number,
-        default: null,
-        comment: 'Potential lifetime savings in ILS vs current offer',
-      },
-      aiReasoning: {
-        type: String,
-        default: null,
-        comment: 'AI explanation of analysis and recommendations',
-      },
-      recommendations: [
-        {
-          type: String,
-          trim: true,
-        },
-      ],
-      marketComparison: {
-        averageRate: {
-          type: Number,
-          default: null,
-        },
-        bestRate: {
-          type: Number,
-          default: null,
-        },
-        ratePercentile: {
-          type: Number,
-          min: 0,
-          max: 100,
-          default: null,
-          comment: 'Where this offer falls in market (0=best, 100=worst)',
-        },
-      },
-      analyzedAt: {
-        type: Date,
-        default: null,
-      },
+      recommendedRate: { type: Number, default: null },
+      savings: { type: Number, default: null }, // lifetime savings in ILS
+      aiReasoning: { type: String, default: null },
+      recommendations: [{ type: String }],
     },
+
+    /**
+     * Processing status of the offer
+     */
     status: {
       type: String,
       enum: ['pending', 'processing', 'analyzed', 'error'],
       default: 'pending',
-      index: true,
     },
+
+    /**
+     * Error message if processing failed
+     */
     errorMessage: {
       type: String,
-      default: null,
-      comment: 'Error details if status is error',
-    },
-    processingStartedAt: {
-      type: Date,
       default: null,
     },
   },
   {
-    timestamps: true,
-    toJSON: { virtuals: true },
-    toObject: { virtuals: true },
+    timestamps: true, // adds createdAt and updatedAt
   }
 );
 
-/**
- * Virtual: Check if offer has been fully analyzed
- */
-offerSchema.virtual('isAnalyzed').get(function () {
-  return this.status === 'analyzed';
-});
-
-/**
- * Virtual: Check if offer is still being processed
- */
-offerSchema.virtual('isProcessing').get(function () {
-  return this.status === 'pending' || this.status === 'processing';
-});
-
-/**
- * Virtual: Calculate total cost of mortgage
- */
-offerSchema.virtual('totalCost').get(function () {
-  if (
-    this.extractedData.monthlyPayment &&
-    this.extractedData.term
-  ) {
-    return this.extractedData.monthlyPayment * this.extractedData.term * 12;
-  }
-  return null;
-});
-
-/**
- * Pre-save middleware: Set processingStartedAt when status changes to processing
- */
-offerSchema.pre('save', function (next) {
-  if (this.isModified('status') && this.status === 'processing') {
-    this.processingStartedAt = new Date();
-  }
-  if (this.isModified('status') && this.status === 'analyzed') {
-    this.analysis.analyzedAt = new Date();
-  }
-  next();
-});
-
-// Indexes for performance
+// Compound index for efficient user-specific queries
 offerSchema.index({ userId: 1, createdAt: -1 });
 offerSchema.index({ userId: 1, status: 1 });
-offerSchema.index({ status: 1, createdAt: -1 });
 
-const Offer = mongoose.model('Offer', offerSchema);
+/**
+ * Virtual: human-readable file size
+ */
+offerSchema.virtual('fileSizeFormatted').get(function () {
+  const bytes = this.originalFile.size;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+});
 
-module.exports = Offer;
+/**
+ * Transform output: remove internal fields from JSON responses
+ */
+offerSchema.set('toJSON', {
+  virtuals: true,
+  transform: (doc, ret) => {
+    delete ret.__v;
+    // Remove Cloudinary publicId from client responses
+    if (ret.originalFile) {
+      delete ret.originalFile.publicId;
+    }
+    return ret;
+  },
+});
+
+module.exports = mongoose.model('Offer', offerSchema);

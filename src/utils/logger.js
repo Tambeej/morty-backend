@@ -1,33 +1,51 @@
 /**
- * Winston Logger Utility
- * Provides structured logging with different transports for dev/prod.
+ * Logger Utility
+ * Winston-based structured logging for the application.
+ * Outputs JSON in production, colorized text in development.
  */
 
-const { createLogger, format, transports } = require('winston');
+const winston = require('winston');
 
-const { combine, timestamp, printf, colorize, errors } = format;
+const { combine, timestamp, printf, colorize, errors, json } = winston.format;
 
-const devFormat = printf(({ level, message, timestamp: ts, stack, ...meta }) => {
-  const metaStr = Object.keys(meta).length ? `\n${JSON.stringify(meta, null, 2)}` : '';
-  return `${ts} [${level}]: ${stack || message}${metaStr}`;
-});
+/**
+ * Custom log format for development: colorized, human-readable.
+ */
+const devFormat = combine(
+  colorize({ all: true }),
+  timestamp({ format: 'HH:mm:ss' }),
+  errors({ stack: true }),
+  printf(({ level, message, timestamp: ts, stack, ...meta }) => {
+    let log = `${ts} [${level}]: ${message}`;
+    if (Object.keys(meta).length > 0) {
+      log += ` ${JSON.stringify(meta)}`;
+    }
+    if (stack) {
+      log += `\n${stack}`;
+    }
+    return log;
+  })
+);
 
-const prodFormat = printf((info) => JSON.stringify(info));
+/**
+ * Production format: structured JSON for log aggregation.
+ */
+const prodFormat = combine(
+  timestamp(),
+  errors({ stack: true }),
+  json()
+);
 
-const logger = createLogger({
-  level: process.env.LOG_LEVEL || 'info',
-  format: combine(
-    timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-    errors({ stack: true })
-  ),
+const isProduction = process.env.NODE_ENV === 'production';
+
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || (isProduction ? 'info' : 'debug'),
+  format: isProduction ? prodFormat : devFormat,
   transports: [
-    new transports.Console({
-      format:
-        process.env.NODE_ENV === 'production'
-          ? prodFormat
-          : combine(colorize(), devFormat),
-    }),
+    new winston.transports.Console(),
   ],
+  // Don't exit on uncaught exceptions — let the process manager handle it
+  exitOnError: false,
 });
 
 module.exports = logger;

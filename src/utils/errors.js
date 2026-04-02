@@ -1,81 +1,131 @@
 /**
- * Custom error classes and global error handler for Express.
+ * Custom Error Classes and Utilities
+ * Provides structured error handling throughout the application.
  */
 
 /**
- * AppError — operational error with an HTTP status code.
- * Use this for expected errors (validation failures, not found, etc.).
+ * AppError - Custom operational error class.
+ * Used for expected errors (validation failures, not found, unauthorized, etc.)
+ * that should be returned to the client with a specific HTTP status code.
+ *
+ * @param {string} message - Human-readable error message
+ * @param {number} statusCode - HTTP status code (400, 401, 403, 404, 422, 500, etc.)
+ * @param {Array} [details] - Optional array of validation error details
  */
 class AppError extends Error {
-  /**
-   * @param {string} message - Human-readable error message
-   * @param {number} statusCode - HTTP status code (default 500)
-   */
-  constructor(message, statusCode = 500) {
+  constructor(message, statusCode = 500, details = null) {
     super(message);
+    this.name = 'AppError';
     this.statusCode = statusCode;
-    this.isOperational = true;
-    Error.captureStackTrace(this, this.constructor);
+    this.details = details;
+    this.isOperational = true; // Distinguishes from programming errors
+
+    // Capture stack trace (V8)
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, AppError);
+    }
   }
 }
 
 /**
- * Global Express error-handling middleware.
- * Must be registered AFTER all routes.
+ * Format a Mongoose validation error into AppError details.
  *
- * @param {Error} err
- * @param {import('express').Request} req
- * @param {import('express').Response} res
- * @param {import('express').NextFunction} next
+ * @param {Object} mongooseError - Mongoose ValidationError
+ * @returns {Array} Array of { field, message } objects
  */
-function globalErrorHandler(err, req, res, next) { // eslint-disable-line no-unused-vars
-  const statusCode = err.statusCode || 500;
-  const isOperational = err.isOperational || false;
+const formatMongooseValidationError = (mongooseError) => {
+  return Object.values(mongooseError.errors).map((err) => ({
+    field: err.path,
+    message: err.message,
+  }));
+};
 
-  // Log non-operational (unexpected) errors at error level
-  if (!isOperational) {
-    const logger = require('./logger');
-    logger.error('Unexpected error:', {
-      message: err.message,
+/**
+ * Global error handler middleware for Express.
+ * Must be registered LAST in the middleware chain.
+ *
+ * @param {Error} err - Error object
+ * @param {Object} req - Express request
+ * @param {Object} res - Express response
+ * @param {Function} next - Next middleware (required for Express error handler signature)
+ */
+const globalErrorHandler = (err, req, res, next) => { // eslint-disable-line no-unused-vars
+  const logger = require('./logger');
+
+  // Default to 500 Internal Server Error
+  let statusCode = err.statusCode || 500;
+  let message = err.message || 'Internal Server Error';
+  let details = err.details || null;
+
+  // Handle Mongoose duplicate key error (e.g., duplicate email)
+  if (err.code === 11000) {
+    statusCode = 409;
+    const field = Object.keys(err.keyValue || {})[0] || 'field';
+    message = `A record with this ${field} already exists.`;
+  }
+
+  // Handle Mongoose validation errors
+  if (err.name === 'ValidationError') {
+    statusCode = 422;
+    message = 'Validation failed';
+    details = formatMongooseValidationError(err);
+  }
+
+  // Handle Mongoose CastError (invalid ObjectId)
+  if (err.name === 'CastError') {
+    statusCode = 400;
+    message = `Invalid value for field: ${err.path}`;
+  }
+
+  // Handle JWT errors
+  if (err.name === 'JsonWebTokenError') {
+    statusCode = 401;
+    message = 'Invalid authentication token.';
+  }
+  if (err.name === 'TokenExpiredError') {
+    statusCode = 401;
+    message = 'Authentication token has expired. Please log in again.';
+  }
+
+  // Log server errors (5xx) with full stack trace
+  if (statusCode >= 500) {
+    logger.error(`[${statusCode}] ${message}`, {
+      error: err.message,
       stack: err.stack,
+      url: req.originalUrl,
+      method: req.method,
+      userId: req.user ? req.user.id : 'unauthenticated',
+    });
+  } else {
+    logger.warn(`[${statusCode}] ${message}`, {
       url: req.originalUrl,
       method: req.method,
     });
   }
 
-  // Mongoose duplicate key error
-  if (err.code === 11000) {
-    const field = Object.keys(err.keyValue || {})[0] || 'field';
-    return res.status(409).json({
-      success: false,
-      error: `A record with this ${field} already exists.`,
-    });
-  }
-
-  // Mongoose validation error
-  if (err.name === 'ValidationError') {
-    const messages = Object.values(err.errors)
-      .map((e) => e.message)
-      .join('; ');
-    return res.status(422).json({
-      success: false,
-      error: messages,
-    });
-  }
-
-  // JWT errors (should be caught upstream, but just in case)
-  if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
-    return res.status(401).json({
-      success: false,
-      error: 'Invalid or expired token.',
-    });
-  }
-
-  return res.status(statusCode).json({
+  // Build response
+  const response = {
     success: false,
-    error: isOperational ? err.message : 'An unexpected error occurred. Please try again later.',
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
-  });
-}
+    error: {
+      message,
+      statusCode,
+    },
+  };
 
-module.exports = { AppError, globalErrorHandler };
+  if (details) {
+    response.error.details = details;
+  }
+
+  // Include stack trace in development only
+  if (process.env.NODE_ENV === 'development') {
+    response.error.stack = err.stack;
+  }
+
+  res.status(statusCode).json(response);
+};
+
+module.exports = {
+  AppError,
+  globalErrorHandler,
+  formatMongooseValidationError,
+};

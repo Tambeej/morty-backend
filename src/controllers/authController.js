@@ -5,242 +5,199 @@
 
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { AppError } = require('../utils/errors');
 const logger = require('../utils/logger');
-const Joi = require('joi');
-
-// ─── Validation Schemas ───────────────────────────────────────────────────────
-
-const registerSchema = Joi.object({
-  email: Joi.string().email().lowercase().trim().required().messages({
-    'string.email': 'Please provide a valid email address',
-    'any.required': 'Email is required',
-  }),
-  password: Joi.string().min(8).required().messages({
-    'string.min': 'Password must be at least 8 characters',
-    'any.required': 'Password is required',
-  }),
-  phone: Joi.string()
-    .pattern(/^(\+972|0)[0-9]{8,9}$/)
-    .optional()
-    .messages({
-      'string.pattern.base': 'Please provide a valid Israeli phone number',
-    }),
-});
-
-const loginSchema = Joi.object({
-  email: Joi.string().email().lowercase().trim().required(),
-  password: Joi.string().required(),
-});
-
-// ─── Token Helpers ────────────────────────────────────────────────────────────
 
 /**
- * Generate a short-lived access token (24h).
+ * Generate a JWT access token (24h expiry).
+ *
+ * @param {Object} payload - { id, email }
+ * @returns {string} JWT token
  */
-const generateAccessToken = (user) =>
-  jwt.sign(
-    { id: user._id, email: user.email },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
-  );
+const generateAccessToken = (payload) => {
+  return jwt.sign(payload, process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_EXPIRES_IN || '24h',
+  });
+};
 
 /**
- * Generate a long-lived refresh token (7d).
+ * Generate a JWT refresh token (7d expiry).
+ *
+ * @param {Object} payload - { id }
+ * @returns {string} JWT refresh token
  */
-const generateRefreshToken = (user) =>
-  jwt.sign(
-    { id: user._id },
-    process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET,
-    { expiresIn: '7d' }
-  );
-
-// ─── Controllers ─────────────────────────────────────────────────────────────
+const generateRefreshToken = (payload) => {
+  return jwt.sign(payload, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET, {
+    expiresIn: '7d',
+  });
+};
 
 /**
  * POST /api/v1/auth/register
+ * Register a new user account.
+ *
+ * @param {Object} req - { body: { email, password, phone } }
+ * @param {Object} res
+ * @param {Function} next
  */
-const register = async (req, res) => {
+const register = async (req, res, next) => {
   try {
-    const { error, value } = registerSchema.validate(req.body, {
-      abortEarly: false,
-      stripUnknown: true,
-    });
+    const { email, password, phone } = req.body;
 
-    if (error) {
-      return res.status(422).json({
-        success: false,
-        message: 'Validation failed',
-        errors: error.details.map((d) => ({ field: d.path.join('.'), message: d.message })),
-      });
-    }
-
-    const existingUser = await User.findOne({ email: value.email });
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
     if (existingUser) {
-      return res.status(409).json({
-        success: false,
-        message: 'An account with this email already exists',
-      });
+      return next(new AppError('An account with this email already exists.', 409));
     }
 
-    const user = await User.create(value);
+    // Create user (password hashed by pre-save hook)
+    const user = await User.create({ email, password, phone });
 
-    const token = generateAccessToken(user);
-    const refresh = generateRefreshToken(user);
+    // Generate tokens
+    const accessToken = generateAccessToken({ id: user._id, email: user.email });
+    const refreshToken = generateRefreshToken({ id: user._id });
 
     // Store refresh token hash in DB
-    user.refreshToken = refresh;
+    user.refreshToken = refreshToken;
     await user.save({ validateBeforeSave: false });
 
-    logger.info('New user registered', { userId: user._id, email: user.email });
+    logger.info(`New user registered: ${email}`);
 
-    return res.status(201).json({
+    res.status(201).json({
       success: true,
-      message: 'Account created successfully',
-      token,
-      refreshToken: refresh,
-      user: {
-        id: user._id,
-        email: user.email,
-        phone: user.phone,
-        verified: user.verified,
-        createdAt: user.createdAt,
+      message: 'Account created successfully.',
+      data: {
+        token: accessToken,
+        refreshToken,
+        user: {
+          id: user._id,
+          email: user.email,
+          phone: user.phone,
+          createdAt: user.createdAt,
+        },
       },
     });
-  } catch (err) {
-    logger.error('Register error', { error: err.message });
-    return res.status(500).json({ success: false, message: 'Registration failed' });
+  } catch (error) {
+    next(error);
   }
 };
 
 /**
  * POST /api/v1/auth/login
+ * Authenticate user and return tokens.
+ *
+ * @param {Object} req - { body: { email, password } }
+ * @param {Object} res
+ * @param {Function} next
  */
-const login = async (req, res) => {
+const login = async (req, res, next) => {
   try {
-    const { error, value } = loginSchema.validate(req.body, {
-      abortEarly: false,
-      stripUnknown: true,
-    });
+    const { email, password } = req.body;
 
-    if (error) {
-      return res.status(422).json({
-        success: false,
-        message: 'Validation failed',
-        errors: error.details.map((d) => ({ field: d.path.join('.'), message: d.message })),
-      });
-    }
-
-    const user = await User.findOne({ email: value.email }).select('+password +refreshToken');
+    // Find user and include password for comparison
+    const user = await User.findOne({ email }).select('+password +refreshToken');
     if (!user) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+      return next(new AppError('Invalid email or password.', 401));
     }
 
-    const isMatch = await user.comparePassword(value.password);
-    if (!isMatch) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    // Verify password
+    const isPasswordValid = await user.comparePassword(password);
+    if (!isPasswordValid) {
+      return next(new AppError('Invalid email or password.', 401));
     }
 
-    const token = generateAccessToken(user);
-    const refresh = generateRefreshToken(user);
+    // Generate tokens
+    const accessToken = generateAccessToken({ id: user._id, email: user.email });
+    const refreshToken = generateRefreshToken({ id: user._id });
 
-    user.refreshToken = refresh;
+    // Update refresh token in DB
+    user.refreshToken = refreshToken;
     await user.save({ validateBeforeSave: false });
 
-    logger.info('User logged in', { userId: user._id });
+    logger.info(`User logged in: ${email}`);
 
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
-      message: 'Login successful',
-      token,
-      refreshToken: refresh,
-      user: {
-        id: user._id,
-        email: user.email,
-        phone: user.phone,
-        verified: user.verified,
-        createdAt: user.createdAt,
+      message: 'Login successful.',
+      data: {
+        token: accessToken,
+        refreshToken,
+        user: {
+          id: user._id,
+          email: user.email,
+          phone: user.phone,
+          createdAt: user.createdAt,
+        },
       },
     });
-  } catch (err) {
-    logger.error('Login error', { error: err.message });
-    return res.status(500).json({ success: false, message: 'Login failed' });
+  } catch (error) {
+    next(error);
   }
 };
 
 /**
  * POST /api/v1/auth/refresh
+ * Exchange a valid refresh token for a new access token.
+ *
+ * @param {Object} req - { body: { refreshToken } }
+ * @param {Object} res
+ * @param {Function} next
  */
-const refreshToken = async (req, res) => {
+const refreshToken = async (req, res, next) => {
   try {
     const { refreshToken: token } = req.body;
 
     if (!token) {
-      return res.status(401).json({ success: false, message: 'Refresh token required' });
+      return next(new AppError('Refresh token is required.', 400));
     }
 
-    const decoded = jwt.verify(
-      token,
-      process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET
-    );
+    // Verify the refresh token
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET);
+    } catch (err) {
+      return next(new AppError('Invalid or expired refresh token. Please log in again.', 401));
+    }
 
+    // Find user and verify stored refresh token matches
     const user = await User.findById(decoded.id).select('+refreshToken');
     if (!user || user.refreshToken !== token) {
-      return res.status(401).json({ success: false, message: 'Invalid refresh token' });
+      return next(new AppError('Refresh token is invalid or has been revoked.', 401));
     }
 
-    const newAccessToken = generateAccessToken(user);
-    const newRefreshToken = generateRefreshToken(user);
+    // Issue new access token
+    const newAccessToken = generateAccessToken({ id: user._id, email: user.email });
 
-    user.refreshToken = newRefreshToken;
-    await user.save({ validateBeforeSave: false });
-
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
-      token: newAccessToken,
-      refreshToken: newRefreshToken,
+      data: { token: newAccessToken },
     });
-  } catch (err) {
-    return res.status(401).json({ success: false, message: 'Invalid or expired refresh token' });
+  } catch (error) {
+    next(error);
   }
 };
 
 /**
  * POST /api/v1/auth/logout
+ * Invalidate the user's refresh token.
+ *
+ * @param {Object} req - Authenticated request (req.user set by auth middleware)
+ * @param {Object} res
+ * @param {Function} next
  */
-const logout = async (req, res) => {
+const logout = async (req, res, next) => {
   try {
     await User.findByIdAndUpdate(req.user.id, { refreshToken: null });
-    logger.info('User logged out', { userId: req.user.id });
-    return res.status(200).json({ success: true, message: 'Logged out successfully' });
-  } catch (err) {
-    logger.error('Logout error', { error: err.message });
-    return res.status(500).json({ success: false, message: 'Logout failed' });
-  }
-};
 
-/**
- * GET /api/v1/auth/me
- */
-const getMe = async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    return res.status(200).json({
+    logger.info(`User logged out: ${req.user.email}`);
+
+    res.status(200).json({
       success: true,
-      user: {
-        id: user._id,
-        email: user.email,
-        phone: user.phone,
-        verified: user.verified,
-        createdAt: user.createdAt,
-      },
+      message: 'Logged out successfully.',
     });
-  } catch (err) {
-    logger.error('getMe error', { error: err.message });
-    return res.status(500).json({ success: false, message: 'Failed to fetch user' });
+  } catch (error) {
+    next(error);
   }
 };
 
-module.exports = { register, login, refreshToken, logout, getMe };
+module.exports = { register, login, refreshToken, logout };

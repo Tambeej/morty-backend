@@ -1,31 +1,23 @@
 /**
  * Profile Routes
- * Handles financial profile CRUD operations.
- * All routes require JWT authentication.
+ * Handles user financial profile management.
  *
- * Base path: /api/v1/profile
+ * Routes:
+ *   GET /api/v1/profile/financials  - Get user's financial profile
+ *   PUT /api/v1/profile/financials  - Create or update financial profile
  */
 
 const express = require('express');
 const router = express.Router();
-const { getFinancials, updateFinancials } = require('../controllers/profileController');
-const authMiddleware = require('../middleware/auth');
 
-/**
- * @route   GET /api/v1/profile/financials
- * @desc    Get authenticated user's financial profile
- * @access  Private (JWT required)
- * @returns {Object} Financial profile data with computed metrics
- */
-router.get('/financials', authMiddleware, getFinancials);
+const { authenticate } = require('../middleware/auth');
+const { validateFinancials } = require('../middleware/validate');
+const { getFinancials, upsertFinancials } = require('../controllers/profileController');
 
-/**
- * @route   PUT /api/v1/profile/financials
- * @desc    Create or update authenticated user's financial profile
- * @access  Private (JWT required)
- * @body    { income, additionalIncome, expenses, assets, debts }
- * @returns {Object} Updated financial profile with computed metrics
- */
-router.put('/financials', authMiddleware, updateFinancials);
+// All profile routes require authentication
+router.use(authenticate);
+
+router.get('/financials', getFinancials);
+router.put('/financials', validateFinancials, upsertFinancials);
 
 module.exports = router;
