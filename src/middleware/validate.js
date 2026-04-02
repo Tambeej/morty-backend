@@ -1,40 +1,33 @@
 /**
- * Request Validation Middleware
- *
- * Factory function that returns an Express middleware which validates
- * req.body (or req.query / req.params) against a Joi schema.
- *
- * Usage:
- *   router.post('/register', validate(registerSchema), authController.register);
+ * Joi Validation Middleware
+ * Validates request body against a provided Joi schema.
  */
 
-'use strict';
-
-const { ValidationError } = require('../utils/errors');
+const { AppError } = require('../utils/errors');
 
 /**
+ * Returns an Express middleware that validates req.body against the given Joi schema.
+ *
  * @param {import('joi').Schema} schema - Joi schema to validate against
- * @param {'body'|'query'|'params'} [source='body'] - Request property to validate
  * @returns {import('express').RequestHandler}
  */
-const validate = (schema, source = 'body') => (req, _res, next) => {
-  const { error, value } = schema.validate(req[source], {
-    abortEarly: false,   // collect all errors, not just the first
-    stripUnknown: true,  // remove unknown keys (security)
-    convert: true,       // coerce types where possible
-  });
+function validate(schema) {
+  return (req, res, next) => {
+    const { error, value } = schema.validate(req.body, {
+      abortEarly: false,   // collect all errors
+      stripUnknown: true,  // remove unknown fields
+      convert: true,       // coerce types where possible
+    });
 
-  if (error) {
-    const details = error.details.map((d) => ({
-      field: d.path.join('.'),
-      message: d.message.replace(/"/g, "'"),
-    }));
-    return next(new ValidationError('Validation failed', details));
-  }
+    if (error) {
+      const messages = error.details.map((d) => d.message).join('; ');
+      return next(new AppError(messages, 422));
+    }
 
-  // Replace req[source] with the sanitised/coerced value
-  req[source] = value;
-  next();
-};
+    // Replace req.body with the sanitised/coerced value
+    req.body = value;
+    return next();
+  };
+}
 
 module.exports = { validate };

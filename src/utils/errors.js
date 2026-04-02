@@ -1,137 +1,81 @@
 /**
- * Custom Error Classes
- * Provides structured error handling for the Morty API.
- * All errors include HTTP status codes and consistent response format.
+ * Custom error classes and global error handler for Express.
  */
 
 /**
- * Base API Error class
- * @extends Error
+ * AppError — operational error with an HTTP status code.
+ * Use this for expected errors (validation failures, not found, etc.).
  */
 class AppError extends Error {
   /**
    * @param {string} message - Human-readable error message
-   * @param {number} statusCode - HTTP status code
-   * @param {string} [code] - Machine-readable error code
-   * @param {Object} [details] - Additional error details
+   * @param {number} statusCode - HTTP status code (default 500)
    */
-  constructor(message, statusCode = 500, code = 'INTERNAL_ERROR', details = null) {
+  constructor(message, statusCode = 500) {
     super(message);
-    this.name = this.constructor.name;
     this.statusCode = statusCode;
-    this.code = code;
-    this.details = details;
-    this.isOperational = true; // Distinguishes operational errors from programming errors
-
+    this.isOperational = true;
     Error.captureStackTrace(this, this.constructor);
   }
+}
 
-  /**
-   * Convert error to JSON response format
-   * @returns {Object} Formatted error response
-   */
-  toJSON() {
-    return {
+/**
+ * Global Express error-handling middleware.
+ * Must be registered AFTER all routes.
+ *
+ * @param {Error} err
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {import('express').NextFunction} next
+ */
+function globalErrorHandler(err, req, res, next) { // eslint-disable-line no-unused-vars
+  const statusCode = err.statusCode || 500;
+  const isOperational = err.isOperational || false;
+
+  // Log non-operational (unexpected) errors at error level
+  if (!isOperational) {
+    const logger = require('./logger');
+    logger.error('Unexpected error:', {
+      message: err.message,
+      stack: err.stack,
+      url: req.originalUrl,
+      method: req.method,
+    });
+  }
+
+  // Mongoose duplicate key error
+  if (err.code === 11000) {
+    const field = Object.keys(err.keyValue || {})[0] || 'field';
+    return res.status(409).json({
       success: false,
-      error: {
-        code: this.code,
-        message: this.message,
-        ...(this.details && { details: this.details }),
-      },
-    };
+      error: `A record with this ${field} already exists.`,
+    });
   }
+
+  // Mongoose validation error
+  if (err.name === 'ValidationError') {
+    const messages = Object.values(err.errors)
+      .map((e) => e.message)
+      .join('; ');
+    return res.status(422).json({
+      success: false,
+      error: messages,
+    });
+  }
+
+  // JWT errors (should be caught upstream, but just in case)
+  if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
+    return res.status(401).json({
+      success: false,
+      error: 'Invalid or expired token.',
+    });
+  }
+
+  return res.status(statusCode).json({
+    success: false,
+    error: isOperational ? err.message : 'An unexpected error occurred. Please try again later.',
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
+  });
 }
 
-/**
- * 400 Bad Request - Invalid input data
- */
-class ValidationError extends AppError {
-  constructor(message = 'Validation failed', details = null) {
-    super(message, 400, 'VALIDATION_ERROR', details);
-  }
-}
-
-/**
- * 401 Unauthorized - Authentication required or failed
- */
-class AuthenticationError extends AppError {
-  constructor(message = 'Authentication required') {
-    super(message, 401, 'AUTHENTICATION_ERROR');
-  }
-}
-
-/**
- * 403 Forbidden - Authenticated but not authorized
- */
-class AuthorizationError extends AppError {
-  constructor(message = 'Access denied') {
-    super(message, 403, 'AUTHORIZATION_ERROR');
-  }
-}
-
-/**
- * 404 Not Found - Resource does not exist
- */
-class NotFoundError extends AppError {
-  constructor(message = 'Resource not found') {
-    super(message, 404, 'NOT_FOUND');
-  }
-}
-
-/**
- * 409 Conflict - Resource already exists
- */
-class ConflictError extends AppError {
-  constructor(message = 'Resource already exists') {
-    super(message, 409, 'CONFLICT_ERROR');
-  }
-}
-
-/**
- * 422 Unprocessable Entity - Business logic error
- */
-class UnprocessableError extends AppError {
-  constructor(message = 'Unable to process request', details = null) {
-    super(message, 422, 'UNPROCESSABLE_ERROR', details);
-  }
-}
-
-/**
- * 429 Too Many Requests - Rate limit exceeded
- */
-class RateLimitError extends AppError {
-  constructor(message = 'Too many requests, please try again later') {
-    super(message, 429, 'RATE_LIMIT_ERROR');
-  }
-}
-
-/**
- * 500 Internal Server Error - Unexpected server error
- */
-class InternalError extends AppError {
-  constructor(message = 'An unexpected error occurred') {
-    super(message, 500, 'INTERNAL_ERROR');
-  }
-}
-
-/**
- * 503 Service Unavailable - External service failure
- */
-class ServiceUnavailableError extends AppError {
-  constructor(message = 'Service temporarily unavailable') {
-    super(message, 503, 'SERVICE_UNAVAILABLE');
-  }
-}
-
-module.exports = {
-  AppError,
-  ValidationError,
-  AuthenticationError,
-  AuthorizationError,
-  NotFoundError,
-  ConflictError,
-  UnprocessableError,
-  RateLimitError,
-  InternalError,
-  ServiceUnavailableError,
-};
+module.exports = { AppError, globalErrorHandler };
