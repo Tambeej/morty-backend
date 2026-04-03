@@ -18,6 +18,8 @@
 const admin = require('firebase-admin');
 const logger = require('../utils/logger');
 
+let firestoreSettingsApplied = false;
+
 /**
  * Build the firebase-admin credential from environment variables.
  *
@@ -59,6 +61,7 @@ function buildCredential() {
  * @returns {admin.firestore.Firestore} The Firestore database instance.
  */
 function initFirestore() {
+  let db;
   if (admin.apps.length === 0) {
     const credential = buildCredential();
     const projectId =
@@ -72,12 +75,16 @@ function initFirestore() {
     });
 
     logger.info('Firebase Admin SDK initialised successfully');
+
+    db = admin.firestore();
+  } else {
+    db = admin.firestore();
   }
 
-  const db = admin.firestore();
-
-  // Use ISO-8601 timestamps (Timestamp → Date) for consistent serialisation
-  db.settings({ ignoreUndefinedProperties: true });
+  if (!firestoreSettingsApplied) {
+    db.settings({ ignoreUndefinedProperties: true });
+    firestoreSettingsApplied = true;
+  }
 
   return db;
 }
