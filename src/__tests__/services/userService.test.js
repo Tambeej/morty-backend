@@ -68,6 +68,21 @@ const sampleUser = {
   password: '$2a$12$hashedpassword',
   phone: '0501234567',
   verified: false,
+  firebaseUid: null,
+  refreshToken: null,
+  createdAt: '2026-04-03T02:16:00.000Z',
+  updatedAt: '2026-04-03T02:16:00.000Z',
+};
+
+/** Sample Google-linked user document. */
+const googleUser = {
+  id: 'firestore-google-user-id',
+  email: 'google@morty.co.il',
+  password: null,
+  phone: '',
+  verified: true,
+  firebaseUid: 'firebase-uid-google-123',
+  displayName: 'Google User',
   refreshToken: null,
   createdAt: '2026-04-03T02:16:00.000Z',
   updatedAt: '2026-04-03T02:16:00.000Z',
@@ -79,6 +94,7 @@ const publicUser = {
   email: sampleUser.email,
   phone: sampleUser.phone,
   verified: sampleUser.verified,
+  firebaseUid: sampleUser.firebaseUid,
   createdAt: sampleUser.createdAt,
   updatedAt: sampleUser.updatedAt,
 };
@@ -95,6 +111,11 @@ describe('userService.toPublicUser', () => {
   it('should retain public fields', () => {
     const result = userService.toPublicUser(sampleUser);
     expect(result).toMatchObject(publicUser);
+  });
+
+  it('should retain firebaseUid field', () => {
+    const result = userService.toPublicUser(googleUser);
+    expect(result).toHaveProperty('firebaseUid', 'firebase-uid-google-123');
   });
 
   it('should return null for null input', () => {
@@ -172,6 +193,39 @@ describe('userService.findByEmail', () => {
   });
 });
 
+// ── findByFirebaseUid ─────────────────────────────────────────────────────────
+
+describe('userService.findByFirebaseUid', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('should return the user when found by Firebase UID', async () => {
+    const docSnap = { id: googleUser.id, data: () => googleUser };
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: false, docs: [docSnap] });
+
+    const result = await userService.findByFirebaseUid('firebase-uid-google-123');
+    expect(result).toMatchObject({ id: googleUser.id, firebaseUid: 'firebase-uid-google-123' });
+  });
+
+  it('should return null when Firebase UID is not found', async () => {
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+
+    const result = await userService.findByFirebaseUid('unknown-firebase-uid');
+    expect(result).toBeNull();
+  });
+
+  it('should return null for falsy firebaseUid', async () => {
+    const result = await userService.findByFirebaseUid(null);
+    expect(result).toBeNull();
+  });
+
+  it('should query Firestore with the correct field', async () => {
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+
+    await userService.findByFirebaseUid('some-firebase-uid');
+    expect(mockCollectionRef.where).toHaveBeenCalledWith('firebaseUid', '==', 'some-firebase-uid');
+  });
+});
+
 // ── getUserById ───────────────────────────────────────────────────────────────
 
 describe('userService.getUserById', () => {
@@ -215,6 +269,7 @@ describe('userService.createUser', () => {
     expect(result).not.toHaveProperty('refreshToken');
     expect(result).toHaveProperty('email', 'new@morty.co.il');
     expect(result).toHaveProperty('verified', false);
+    expect(result).toHaveProperty('firebaseUid', null);
   });
 
   it('should throw 409 ConflictError when email already exists', async () => {
@@ -264,6 +319,212 @@ describe('userService.createUser', () => {
     expect(result).toHaveProperty('updatedAt');
     expect(() => new Date(result.createdAt)).not.toThrow();
     expect(new Date(result.createdAt).toISOString()).toBe(result.createdAt);
+  });
+
+  it('should store firebaseUid as null for email/password users', async () => {
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+    mockDocRef.set.mockResolvedValueOnce({});
+
+    await userService.createUser({ email: 'nofire@morty.co.il', password: 'Password123!' });
+
+    const setCall = mockDocRef.set.mock.calls[0][0];
+    expect(setCall.firebaseUid).toBeNull();
+  });
+});
+
+// ── findOrCreateByFirebaseUser ────────────────────────────────────────────────
+
+describe('userService.findOrCreateByFirebaseUser', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  const firebaseParams = {
+    email: 'google@morty.co.il',
+    firebaseUid: 'firebase-uid-google-123',
+    emailVerified: true,
+    displayName: 'Google User',
+  };
+
+  // ── Path 1: Returning Google user (found by firebaseUid) ──────────────────
+
+  it('should return existing user found by firebaseUid (fast path)', async () => {
+    // findByFirebaseUid returns the existing Google user
+    const docSnap = { id: googleUser.id, data: () => googleUser };
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: false, docs: [docSnap] });
+    // update() for updatedAt
+    mockDocRef.update.mockResolvedValueOnce({});
+
+    const result = await userService.findOrCreateByFirebaseUser(firebaseParams);
+
+    expect(result).toHaveProperty('id', googleUser.id);
+    expect(result).toHaveProperty('email', 'google@morty.co.il');
+    expect(result).toHaveProperty('firebaseUid', 'firebase-uid-google-123');
+    expect(result).not.toHaveProperty('password');
+    expect(result).not.toHaveProperty('refreshToken');
+  });
+
+  it('should update verified=true when emailVerified is true and user was unverified', async () => {
+    const unverifiedGoogleUser = { ...googleUser, verified: false };
+    const docSnap = { id: unverifiedGoogleUser.id, data: () => unverifiedGoogleUser };
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: false, docs: [docSnap] });
+    mockDocRef.update.mockResolvedValueOnce({});
+
+    const result = await userService.findOrCreateByFirebaseUser({
+      ...firebaseParams,
+      emailVerified: true,
+    });
+
+    expect(mockDocRef.update).toHaveBeenCalledWith(
+      expect.objectContaining({ verified: true })
+    );
+    expect(result).toHaveProperty('verified', true);
+  });
+
+  it('should NOT set verified=true when emailVerified is false', async () => {
+    const docSnap = { id: googleUser.id, data: () => googleUser };
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: false, docs: [docSnap] });
+    mockDocRef.update.mockResolvedValueOnce({});
+
+    await userService.findOrCreateByFirebaseUser({
+      ...firebaseParams,
+      emailVerified: false,
+    });
+
+    const updateCall = mockDocRef.update.mock.calls[0][0];
+    expect(updateCall).not.toHaveProperty('verified');
+  });
+
+  // ── Path 2: Existing email/password user linking Google ───────────────────
+
+  it('should link firebaseUid to existing email/password user', async () => {
+    // findByFirebaseUid → not found
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+    // findByEmail → existing email/password user (no firebaseUid)
+    const emailUser = { ...sampleUser, firebaseUid: null };
+    const docSnap = { id: emailUser.id, data: () => emailUser };
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: false, docs: [docSnap] });
+    // update() for linking
+    mockDocRef.update.mockResolvedValueOnce({});
+
+    const result = await userService.findOrCreateByFirebaseUser(firebaseParams);
+
+    expect(mockDocRef.update).toHaveBeenCalledWith(
+      expect.objectContaining({ firebaseUid: 'firebase-uid-google-123' })
+    );
+    expect(result).toHaveProperty('id', sampleUser.id);
+    expect(result).toHaveProperty('firebaseUid', 'firebase-uid-google-123');
+    expect(result).not.toHaveProperty('password');
+  });
+
+  it('should set verified=true when linking and emailVerified is true', async () => {
+    // findByFirebaseUid → not found
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+    // findByEmail → existing user
+    const emailUser = { ...sampleUser, firebaseUid: null, verified: false };
+    const docSnap = { id: emailUser.id, data: () => emailUser };
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: false, docs: [docSnap] });
+    mockDocRef.update.mockResolvedValueOnce({});
+
+    await userService.findOrCreateByFirebaseUser({ ...firebaseParams, emailVerified: true });
+
+    expect(mockDocRef.update).toHaveBeenCalledWith(
+      expect.objectContaining({ firebaseUid: 'firebase-uid-google-123', verified: true })
+    );
+  });
+
+  it('should throw 409 when email is already linked to a DIFFERENT Firebase UID', async () => {
+    // findByFirebaseUid → not found (different UID)
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+    // findByEmail → user with a different firebaseUid
+    const conflictUser = { ...sampleUser, firebaseUid: 'different-firebase-uid' };
+    const docSnap = { id: conflictUser.id, data: () => conflictUser };
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: false, docs: [docSnap] });
+
+    await expect(
+      userService.findOrCreateByFirebaseUser(firebaseParams)
+    ).rejects.toMatchObject({ statusCode: 409, errorCode: 'CONFLICT_ERROR' });
+  });
+
+  // ── Path 3: Brand-new Google user ────────────────────────────────────────
+
+  it('should create a new passwordless user for a brand-new Google account', async () => {
+    // findByFirebaseUid → not found
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+    // findByEmail → not found
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+    // docRef.set succeeds
+    mockDocRef.set.mockResolvedValueOnce({});
+
+    const result = await userService.findOrCreateByFirebaseUser(firebaseParams);
+
+    expect(mockDocRef.set).toHaveBeenCalledTimes(1);
+    const setCall = mockDocRef.set.mock.calls[0][0];
+    expect(setCall.password).toBeNull();
+    expect(setCall.firebaseUid).toBe('firebase-uid-google-123');
+    expect(setCall.email).toBe('google@morty.co.il');
+    expect(setCall.verified).toBe(true);
+
+    expect(result).not.toHaveProperty('password');
+    expect(result).not.toHaveProperty('refreshToken');
+    expect(result).toHaveProperty('firebaseUid', 'firebase-uid-google-123');
+    expect(result).toHaveProperty('verified', true);
+  });
+
+  it('should normalise email to lowercase when creating new Google user', async () => {
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+    mockDocRef.set.mockResolvedValueOnce({});
+
+    const result = await userService.findOrCreateByFirebaseUser({
+      ...firebaseParams,
+      email: 'GOOGLE@MORTY.CO.IL',
+    });
+
+    expect(result.email).toBe('google@morty.co.il');
+    const setCall = mockDocRef.set.mock.calls[0][0];
+    expect(setCall.email).toBe('google@morty.co.il');
+  });
+
+  it('should set displayName from Google profile when creating new user', async () => {
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+    mockDocRef.set.mockResolvedValueOnce({});
+
+    await userService.findOrCreateByFirebaseUser({
+      ...firebaseParams,
+      displayName: 'John Doe',
+    });
+
+    const setCall = mockDocRef.set.mock.calls[0][0];
+    expect(setCall.displayName).toBe('John Doe');
+  });
+
+  it('should set verified=false when emailVerified is false for new user', async () => {
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
+    mockDocRef.set.mockResolvedValueOnce({});
+
+    const result = await userService.findOrCreateByFirebaseUser({
+      ...firebaseParams,
+      emailVerified: false,
+    });
+
+    expect(result).toHaveProperty('verified', false);
+    const setCall = mockDocRef.set.mock.calls[0][0];
+    expect(setCall.verified).toBe(false);
+  });
+
+  // ── Input validation ──────────────────────────────────────────────────────
+
+  it('should throw 422 when email is missing', async () => {
+    await expect(
+      userService.findOrCreateByFirebaseUser({ email: '', firebaseUid: 'uid-123' })
+    ).rejects.toMatchObject({ statusCode: 422 });
+  });
+
+  it('should throw 422 when firebaseUid is missing', async () => {
+    await expect(
+      userService.findOrCreateByFirebaseUser({ email: 'test@morty.co.il', firebaseUid: '' })
+    ).rejects.toMatchObject({ statusCode: 422 });
   });
 });
 
