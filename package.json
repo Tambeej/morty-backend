@@ -31,11 +31,16 @@
   },
   "devDependencies": {
     "jest": "^29.7.0",
+    "node-mocks-http": "^1.14.1",
     "nodemon": "^3.1.4",
     "supertest": "^7.0.0"
   },
   "jest": {
     "testEnvironment": "node",
-    "testMatch": ["**/__tests__/**/*.test.js", "**/src/tests/**/*.test.js"]
+    "testMatch": [
+      "**/__tests__/**/*.test.js",
+      "**/src/tests/**/*.test.js",
+      "**/src/__tests__/**/*.test.js"
+    ]
   }
 }
