@@ -117,15 +117,19 @@ All responses (success and error) use a consistent JSON envelope:
 |-------------|------------------------|---------|
 | 400 | — | Bad request (missing required field, invalid param) |
 | 401 | `INVALID_CREDENTIALS` | Wrong email or password |
+| 401 | `GOOGLE_ACCOUNT` | Account uses Google sign-in; email/password login rejected |
+| 401 | `INVALID_FIREBASE_TOKEN` | Firebase ID token is expired, malformed, or invalid |
 | 401 | `INVALID_REFRESH_TOKEN` | Refresh token is expired or malformed |
 | 401 | `REFRESH_TOKEN_MISMATCH` | Refresh token does not match stored value |
 | 401 | `UNAUTHORIZED` | Missing or invalid access token |
 | 403 | `FORBIDDEN` | Authenticated but not authorised for this resource |
 | 404 | — | Resource not found |
-| 409 | `CONFLICT_ERROR` | Email already registered |
+| 409 | `CONFLICT_ERROR` | Email already registered or linked to a different Google account |
 | 422 | `VALIDATION_ERROR` | Request body failed Joi validation |
+| 422 | `MISSING_EMAIL` | Firebase token verified but contains no email claim |
 | 429 | — | Rate limit exceeded |
 | 500 | — | Internal server error |
+| 500 | `GOOGLE_AUTH_ERROR` | Unexpected server-side failure during Google sign-in |
 | 502 | — | Upstream service error (e.g., Cloudinary upload failed) |
 
 ---
@@ -352,6 +356,7 @@ Authenticate with email and password.
 | Status | Condition |
 |--------|-----------|
 | 401 | Invalid email or password |
+| 401 | Account uses Google sign-in (`GOOGLE_ACCOUNT`) |
 | 422 | Validation failed |
 | 500 | Internal server error |
 
@@ -461,6 +466,103 @@ Get the currently authenticated user's public profile.
 | 401 | Missing or invalid access token |
 | 404 | User not found (token valid but user deleted) |
 | 500 | Internal server error |
+
+---
+
+#### `POST /auth/google`
+
+Verify a Firebase ID token obtained from Google sign-in on the client and
+issue custom JWT tokens. This endpoint is the backend counterpart to the
+frontend `signInWithPopup(GoogleAuthProvider)` flow.
+
+**Access:** Public  
+**Rate limit:** Auth limiter (20 req / 15 min)
+
+**Flow:**
+1. Frontend calls `firebase.auth().signInWithPopup(GoogleAuthProvider)`
+2. Frontend calls `firebaseUser.getIdToken()` to obtain the Firebase ID token
+3. Frontend sends `POST /auth/google { idToken }` to this endpoint
+4. Backend verifies the token via Firebase Admin SDK (`admin.auth().verifyIdToken()`)
+5. Backend finds or creates the Firestore user document (handles account linking)
+6. Backend issues custom access + refresh tokens and returns the standard auth payload
+
+**Request body:**
+
+```json
+{
+  "idToken": "eyJhbGciOiJSUzI1NiIsImtpZCI6..."
+}
+```
+
+| Field | Type | Required | Validation |
+|-------|------|----------|------------|
+| `idToken` | string | ✅ | Non-empty Firebase ID token from `firebaseUser.getIdToken()` |
+
+**Response: `200 OK`**
+
+```json
+{
+  "success": true,
+  "data": {
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "user": {
+      "id": "firestore-doc-id-google",
+      "email": "googleuser@gmail.com",
+      "phone": "",
+      "verified": true
+    }
+  },
+  "message": "Google sign-in successful"
+}
+```
+
+> The response shape is **identical** to `POST /auth/login` — the frontend
+> `authService.googleLogin()` can use the same token storage and `AUTH_SUCCESS`
+> dispatch as the regular login flow.
+
+**Account linking behaviour:**
+
+| Scenario | Behaviour |
+|----------|-----------|
+| Returning Google user (firebaseUid match) | Fast path: update `updatedAt`, return existing user |
+| Existing email/password user + first Google sign-in | Link: add `firebaseUid` to existing document |
+| Brand-new Google user | Create passwordless document (`password: null`) |
+| Email already linked to a **different** Google account | `409 CONFLICT_ERROR` |
+| Google-only user attempts email/password login | `401 GOOGLE_ACCOUNT` (from `POST /auth/login`) |
+
+**Error responses:**
+
+| Status | `error.code` | Condition |
+|--------|-------------|----------|
+| 401 | `INVALID_FIREBASE_TOKEN` | Token expired, malformed, wrong audience, or tampered |
+| 409 | `CONFLICT_ERROR` | Email already linked to a different Google account |
+| 422 | `VALIDATION_ERROR` | `idToken` field missing or empty |
+| 422 | `MISSING_EMAIL` | Firebase token verified but contains no email claim |
+| 500 | `GOOGLE_AUTH_ERROR` | Unexpected server-side failure |
+
+**Frontend integration example:**
+
+```js
+// src/services/authService.js
+import { getAuth, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
+import api from './api';
+
+export const googleLogin = async () => {
+  const auth = getAuth();
+  const provider = new GoogleAuthProvider();
+
+  // Step 1: Firebase popup sign-in
+  const result = await signInWithPopup(auth, provider);
+  const idToken = await result.user.getIdToken();
+
+  // Step 2: Exchange Firebase ID token for custom JWTs
+  const { data } = await api.post('/auth/google', { idToken });
+
+  // data.data has the same shape as login: { token, refreshToken, user }
+  return data.data;
+};
+```
 
 ---
 
@@ -1018,6 +1120,7 @@ export default api;
 ```js
 // src/services/authService.js
 import api from './api';
+import { getAuth, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
 
 export const login = async ({ email, password }) => {
   const { data } = await api.post('/auth/login', { email, password });
@@ -1029,6 +1132,23 @@ export const login = async ({ email, password }) => {
 export const register = async ({ email, password, phone }) => {
   const { data } = await api.post('/auth/register', { email, password, phone });
   return data.data;
+};
+
+/**
+ * Google sign-in via Firebase popup.
+ * Returns the same { token, refreshToken, user } shape as login/register.
+ */
+export const googleLogin = async () => {
+  const auth = getAuth();
+  const provider = new GoogleAuthProvider();
+
+  // Step 1: Firebase popup — obtains Google credentials
+  const result = await signInWithPopup(auth, provider);
+  const idToken = await result.user.getIdToken();
+
+  // Step 2: Exchange Firebase ID token for custom JWTs
+  const { data } = await api.post('/auth/google', { idToken });
+  return data.data; // { token, refreshToken, user }
 };
 
 export const refreshToken = async (refreshToken) => {
@@ -1169,3 +1289,9 @@ export const mockDashboard = {
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `VITE_API_URL` | ✅ | Backend API base URL (e.g., `https://morty-backend.onrender.com/api/v1`) |
+| `VITE_FIREBASE_API_KEY` | ✅ | Firebase web app API key |
+| `VITE_FIREBASE_AUTH_DOMAIN` | ✅ | Firebase Auth domain (e.g., `myproject.firebaseapp.com`) |
+| `VITE_FIREBASE_PROJECT_ID` | ✅ | Firebase GCP project ID |
+| `VITE_FIREBASE_STORAGE_BUCKET` | ❌ | Firebase Storage bucket |
+| `VITE_FIREBASE_MESSAGING_SENDER_ID` | ❌ | Firebase Cloud Messaging sender ID |
+| `VITE_FIREBASE_APP_ID` | ✅ | Firebase web app ID |
