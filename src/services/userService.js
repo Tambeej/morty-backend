@@ -9,9 +9,10 @@
  * {
  *   id:           string  (Firestore document ID, also stored as field)
  *   email:        string  (lowercase, unique enforced at application level)
- *   password:     string  (bcrypt hash – never returned to client)
+ *   password:     string|null (bcrypt hash – never returned to client; null for Google-only users)
  *   phone:        string  (default '')
  *   verified:     boolean (default false)
+ *   firebaseUid:  string|null (Firebase Auth UID for Google sign-in users)
  *   refreshToken: string|null
  *   createdAt:    ISO string
  *   updatedAt:    ISO string
@@ -19,7 +20,7 @@
  *
  * Public shape (returned to callers / clients) omits password & refreshToken:
  * {
- *   id, email, phone, verified, createdAt, updatedAt
+ *   id, email, phone, verified, firebaseUid, createdAt, updatedAt
  * }
  */
 
@@ -103,6 +104,29 @@ async function findByEmail(email) {
 }
 
 /**
+ * Find a user by their Firebase Auth UID.
+ *
+ * @param {string} firebaseUid - Firebase Auth UID (from verifyIdToken)
+ * @returns {Promise<Object|null>} Full user document or null
+ */
+async function findByFirebaseUid(firebaseUid) {
+  if (!firebaseUid) return null;
+  try {
+    const snap = await usersRef()
+      .where('firebaseUid', '==', firebaseUid)
+      .limit(1)
+      .get();
+
+    if (snap.empty) return null;
+    const docSnap = snap.docs[0];
+    return { id: docSnap.id, ...docSnap.data() };
+  } catch (err) {
+    logger.error(`userService.findByFirebaseUid error (uid=${firebaseUid}): ${err.message}`);
+    throw err;
+  }
+}
+
+/**
  * Find a user by their stored refresh token.
  *
  * @param {string} refreshToken
@@ -162,6 +186,7 @@ async function createUser({ email, password, phone = '' }) {
     password: hashed,
     phone: phone || '',
     verified: false,
+    firebaseUid: null,
     refreshToken: null,
     createdAt: now,
     updatedAt: now,
@@ -169,6 +194,111 @@ async function createUser({ email, password, phone = '' }) {
 
   await docRef.set(userData);
   logger.info(`userService.createUser: created user ${docRef.id} (${normalised})`);
+
+  return toPublicUser(userData);
+}
+
+/**
+ * Find or create a Firestore user document from a verified Firebase Auth user.
+ *
+ * This is the primary entry point for Google sign-in. It implements the
+ * following idempotent logic:
+ *
+ *   1. Look up by firebaseUid first (fastest path for returning Google users).
+ *   2. If not found, look up by email (handles existing email/password users
+ *      signing in with Google for the first time → link accounts).
+ *   3. If found by email but firebaseUid is missing, update the document to
+ *      store the firebaseUid and mark the email as verified.
+ *   4. If no user exists at all, create a new passwordless user document.
+ *
+ * Email uniqueness is enforced: if two different Firebase UIDs map to the
+ * same email (should not happen in practice), a 409 Conflict is thrown.
+ *
+ * @param {Object} params
+ * @param {string} params.email         - Verified email from Firebase token
+ * @param {string} params.firebaseUid   - Firebase Auth UID (uid claim)
+ * @param {boolean} [params.emailVerified=false] - email_verified claim
+ * @param {string}  [params.displayName='']      - display name from Google
+ * @returns {Promise<Object>} Public user object (no password/refreshToken)
+ */
+async function findOrCreateByFirebaseUser({
+  email,
+  firebaseUid,
+  emailVerified = false,
+  displayName = '',
+}) {
+  if (!email || !firebaseUid) {
+    const err = new Error('email and firebaseUid are required for findOrCreateByFirebaseUser');
+    err.statusCode = 422;
+    throw err;
+  }
+
+  const normalised = email.toLowerCase().trim();
+  const now = new Date().toISOString();
+
+  // ── Path 1: Returning Google user (fastest lookup) ────────────────────────
+  const existingByUid = await findByFirebaseUid(firebaseUid);
+  if (existingByUid) {
+    // Update verified status and updatedAt in case it changed
+    const updates = { updatedAt: now };
+    if (emailVerified && !existingByUid.verified) {
+      updates.verified = true;
+    }
+    await usersRef().doc(existingByUid.id).update(updates);
+    logger.info(
+      `userService.findOrCreateByFirebaseUser: returning Google user ${existingByUid.id} (${normalised})`
+    );
+    return toPublicUser({ ...existingByUid, ...updates });
+  }
+
+  // ── Path 2: Existing email/password user linking Google for the first time ─
+  const existingByEmail = await findByEmail(normalised);
+  if (existingByEmail) {
+    // Sanity check: if this email already has a DIFFERENT firebaseUid, conflict
+    if (existingByEmail.firebaseUid && existingByEmail.firebaseUid !== firebaseUid) {
+      logger.warn(
+        `userService.findOrCreateByFirebaseUser: email ${normalised} already linked to a different Firebase UID`
+      );
+      const err = new Error(
+        'This email is already linked to a different Google account.'
+      );
+      err.statusCode = 409;
+      err.errorCode = 'CONFLICT_ERROR';
+      throw err;
+    }
+
+    // Link the Firebase UID to the existing account
+    const linkUpdates = {
+      firebaseUid,
+      updatedAt: now,
+      ...(emailVerified ? { verified: true } : {}),
+    };
+    await usersRef().doc(existingByEmail.id).update(linkUpdates);
+    logger.info(
+      `userService.findOrCreateByFirebaseUser: linked Firebase UID to existing user ${existingByEmail.id} (${normalised})`
+    );
+    return toPublicUser({ ...existingByEmail, ...linkUpdates });
+  }
+
+  // ── Path 3: Brand-new Google user – create a passwordless document ─────────
+  const docRef = usersRef().doc();
+  const userData = {
+    id: docRef.id,
+    email: normalised,
+    password: null,          // Google-only users have no password
+    phone: '',
+    verified: emailVerified,
+    firebaseUid,
+    displayName: displayName || '',
+    refreshToken: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  await docRef.set(userData);
+  logger.info(
+    `userService.findOrCreateByFirebaseUser: created new Google user ${docRef.id} (${normalised})`
+  );
 
   return toPublicUser(userData);
 }
@@ -324,12 +454,15 @@ module.exports = {
   // Read
   findById,
   findByEmail,
+  findByFirebaseUid,
   findByRefreshToken,
   getUserById,
   // Write
   createUser,
   updateUser,
   deleteUser,
+  // Firebase / Google Auth
+  findOrCreateByFirebaseUser,
   // Auth helpers
   setRefreshToken,
   clearRefreshToken,

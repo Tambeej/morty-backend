@@ -6,6 +6,7 @@
  * POST /api/v1/auth/refresh   – rotate refresh token
  * POST /api/v1/auth/logout    – invalidate refresh token
  * GET  /api/v1/auth/me        – get current user profile (protected)
+ * POST /api/v1/auth/google    – verify Firebase ID token and issue custom JWTs
  */
 
 'use strict';
@@ -13,7 +14,7 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
-const { validate, registerSchema, loginSchema, refreshSchema } = require('../middleware/validate');
+const { validate, registerSchema, loginSchema, refreshSchema, googleSchema } = require('../middleware/validate');
 const { authLimiter } = require('../middleware/rateLimit');
 const { protect } = require('../middleware/auth');
 
@@ -54,5 +55,16 @@ router.post('/logout', authController.logout);
  * @access Protected
  */
 router.get('/me', protect, authController.me);
+
+/**
+ * @route  POST /api/v1/auth/google
+ * @desc   Verify a Firebase ID token from Google sign-in and issue custom JWTs.
+ *         The client obtains the idToken via firebaseUser.getIdToken() after
+ *         signInWithPopup(GoogleAuthProvider). The backend verifies the token
+ *         using Firebase Admin SDK and returns the same auth payload as login.
+ * @access Public
+ * @body   { idToken: string }  – Firebase ID token
+ */
+router.post('/google', validate(googleSchema), authController.googleAuth);
 
 module.exports = router;
