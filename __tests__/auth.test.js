@@ -19,6 +19,20 @@ jest.mock('../src/config/firestore', () => ({
   collection: jest.fn(),
 }));
 
+// ── Mock Firebase Admin SDK ───────────────────────────────────────────────────
+const mockVerifyIdToken = jest.fn();
+jest.mock('../src/config/firebase', () => ({
+  admin: {
+    auth: () => ({
+      verifyIdToken: mockVerifyIdToken,
+    }),
+  },
+  db: {
+    collection: jest.fn(),
+  },
+  firebaseApp: {},
+}));
+
 // ── Mock userService ──────────────────────────────────────────────────────────
 const mockUser = {
   id: 'firestore-uid-abc123',
@@ -45,6 +59,7 @@ jest.mock('../src/services/userService', () => ({
   findByEmail: jest.fn(),
   findById: jest.fn(),
   getUserById: jest.fn(),
+  findOrCreateByFirebaseUser: jest.fn(),
   setRefreshToken: jest.fn().mockResolvedValue(undefined),
   clearRefreshToken: jest.fn().mockResolvedValue(undefined),
   clearRefreshTokenByValue: jest.fn().mockResolvedValue(undefined),
@@ -193,6 +208,20 @@ describe('POST /api/v1/auth/login', () => {
       expect.any(String)
     );
   });
+
+  it('should return 401 for Google-only account attempting email/pass login', async () => {
+    // Google-only user has no password field
+    userService.findByEmail.mockResolvedValue({ ...mockUser, password: null });
+
+    const res = await request(app).post('/api/v1/auth/login').send({
+      email: 'google@morty.co.il',
+      password: 'AnyPassword123!',
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe('GOOGLE_ACCOUNT');
+  });
 });
 
 // ── Refresh ───────────────────────────────────────────────────────────────────
@@ -283,5 +312,158 @@ describe('POST /api/v1/auth/logout', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
+  });
+});
+
+// ── Google Auth ───────────────────────────────────────────────────────────────
+
+describe('POST /api/v1/auth/google', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Reset the mock to default resolved state
+    mockVerifyIdToken.mockReset();
+    userService.findOrCreateByFirebaseUser.mockReset();
+    userService.setRefreshToken.mockResolvedValue(undefined);
+  });
+
+  it('should return 422 when idToken is missing', async () => {
+    const res = await request(app).post('/api/v1/auth/google').send({});
+
+    expect(res.status).toBe(422);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('should return 422 when idToken is an empty string', async () => {
+    const res = await request(app).post('/api/v1/auth/google').send({ idToken: '' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('should return 401 when Firebase token verification fails', async () => {
+    mockVerifyIdToken.mockRejectedValue(new Error('Firebase: ID token has expired.'));
+
+    const res = await request(app)
+      .post('/api/v1/auth/google')
+      .send({ idToken: 'expired.firebase.token' });
+
+    expect(res.status).toBe(401);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe('INVALID_FIREBASE_TOKEN');
+    expect(mockVerifyIdToken).toHaveBeenCalledWith('expired.firebase.token');
+  });
+
+  it('should return 200 with tokens on successful Google sign-in', async () => {
+    // Mock Firebase Admin verifyIdToken to return decoded claims
+    mockVerifyIdToken.mockResolvedValue({
+      uid: 'firebase-google-uid-xyz',
+      email: 'googleuser@gmail.com',
+      email_verified: true,
+      name: 'Google User',
+    });
+
+    // Mock userService to return a public user
+    const googlePublicUser = {
+      id: 'firestore-doc-id-google',
+      email: 'googleuser@gmail.com',
+      phone: '',
+      verified: true,
+      createdAt: '2026-04-03T10:00:00.000Z',
+      updatedAt: '2026-04-03T10:00:00.000Z',
+    };
+    userService.findOrCreateByFirebaseUser.mockResolvedValue(googlePublicUser);
+
+    const res = await request(app)
+      .post('/api/v1/auth/google')
+      .send({ idToken: 'valid.firebase.id.token' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data).toHaveProperty('token');
+    expect(res.body.data).toHaveProperty('refreshToken');
+    expect(res.body.data.user).toMatchObject({
+      id: googlePublicUser.id,
+      email: googlePublicUser.email,
+      verified: true,
+    });
+
+    // Verify Admin SDK was called with the provided token
+    expect(mockVerifyIdToken).toHaveBeenCalledWith('valid.firebase.id.token');
+
+    // Verify userService was called with the decoded Firebase claims
+    expect(userService.findOrCreateByFirebaseUser).toHaveBeenCalledWith({
+      email: 'googleuser@gmail.com',
+      firebaseUid: 'firebase-google-uid-xyz',
+      emailVerified: true,
+      displayName: 'Google User',
+    });
+
+    // Verify refresh token was persisted
+    expect(userService.setRefreshToken).toHaveBeenCalledWith(
+      googlePublicUser.id,
+      expect.any(String)
+    );
+  });
+
+  it('should return 422 when Firebase token has no email claim', async () => {
+    // Some edge case: token verified but no email (should not happen with Google)
+    mockVerifyIdToken.mockResolvedValue({
+      uid: 'firebase-uid-no-email',
+      email: undefined,
+      email_verified: false,
+      name: 'No Email User',
+    });
+
+    const res = await request(app)
+      .post('/api/v1/auth/google')
+      .send({ idToken: 'valid.token.no.email' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe('MISSING_EMAIL');
+  });
+
+  it('should return 409 when email conflict is unresolvable', async () => {
+    mockVerifyIdToken.mockResolvedValue({
+      uid: 'firebase-uid-conflict',
+      email: 'conflict@morty.co.il',
+      email_verified: true,
+      name: 'Conflict User',
+    });
+
+    const conflictErr = new Error('Email conflict: cannot link accounts');
+    conflictErr.statusCode = 409;
+    userService.findOrCreateByFirebaseUser.mockRejectedValue(conflictErr);
+
+    const res = await request(app)
+      .post('/api/v1/auth/google')
+      .send({ idToken: 'valid.token.conflict' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe('CONFLICT_ERROR');
+  });
+
+  it('should return 500 on unexpected server error', async () => {
+    mockVerifyIdToken.mockResolvedValue({
+      uid: 'firebase-uid-error',
+      email: 'error@morty.co.il',
+      email_verified: true,
+      name: 'Error User',
+    });
+
+    userService.findOrCreateByFirebaseUser.mockRejectedValue(
+      new Error('Unexpected Firestore failure')
+    );
+
+    const res = await request(app)
+      .post('/api/v1/auth/google')
+      .send({ idToken: 'valid.token.server.error' });
+
+    expect(res.status).toBe(500);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe('GOOGLE_AUTH_ERROR');
   });
 });

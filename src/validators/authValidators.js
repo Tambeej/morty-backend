@@ -59,4 +59,19 @@ const refreshTokenSchema = Joi.object({
   }),
 });
 
-module.exports = { registerSchema, loginSchema, refreshTokenSchema };
+/**
+ * Schema for POST /auth/google
+ *
+ * Validates that the Firebase ID token is present and non-empty.
+ * The token itself is verified server-side via Firebase Admin SDK.
+ */
+const googleSchema = Joi.object({
+  idToken: Joi.string().min(1).required().messages({
+    'string.base': 'Firebase ID token must be a string.',
+    'string.empty': 'Firebase ID token must not be empty.',
+    'string.min': 'Firebase ID token must not be empty.',
+    'any.required': 'Firebase ID token is required.',
+  }),
+});
+
+module.exports = { registerSchema, loginSchema, refreshTokenSchema, googleSchema };
