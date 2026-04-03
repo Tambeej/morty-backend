@@ -4,6 +4,12 @@
  * Uses Jest mocks for financialService so no real Firestore connection
  * is required during CI. The auth middleware is also mocked to inject
  * a fake user into req.user.
+ *
+ * Covers:
+ *   GET   /api/v1/profile  – retrieve financial profile
+ *   PUT   /api/v1/profile  – upsert (full replace) financial profile
+ *   PATCH /api/v1/profile  – partial update financial profile
+ *   Unit tests for financialService.buildFinancialData helper
  */
 
 'use strict';
@@ -82,20 +88,6 @@ const sampleFinancial = {
 describe('GET /api/v1/profile', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('should return 401 without auth token (real middleware path)', async () => {
-    // Temporarily restore the real auth middleware for this test
-    // by calling the endpoint without a token on a fresh app instance.
-    // Since we mocked the middleware globally, we test the 401 path
-    // by verifying the mock is in place and the route is protected.
-    // The actual 401 is tested via the real middleware in auth.test.js.
-    // Here we just confirm the route exists and returns data when authed.
-    financialService.getFinancials.mockResolvedValue(sampleFinancial);
-    const res = await request(app)
-      .get('/api/v1/profile')
-      .set('Authorization', `Bearer ${makeToken()}`);
-    expect(res.status).toBe(200);
-  });
-
   it('should return 200 with financial data when profile exists', async () => {
     financialService.getFinancials.mockResolvedValue(sampleFinancial);
 
@@ -139,6 +131,17 @@ describe('GET /api/v1/profile', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.success).toBe(false);
+  });
+
+  it('should include a message field in the response', async () => {
+    financialService.getFinancials.mockResolvedValue(sampleFinancial);
+
+    const res = await request(app)
+      .get('/api/v1/profile')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(typeof res.body.message).toBe('string');
   });
 });
 
@@ -195,6 +198,30 @@ describe('PUT /api/v1/profile', () => {
     expect(res.body.data.income).toBe(0);
   });
 
+  it('should return 422 when income is negative', async () => {
+    const res = await request(app)
+      .put('/api/v1/profile')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ income: -100 });
+
+    expect(res.status).toBe(422);
+    expect(res.body.success).toBe(false);
+    expect(res.body.message).toMatch(/validation failed/i);
+  });
+
+  it('should return 422 when debt item is missing required fields', async () => {
+    const res = await request(app)
+      .put('/api/v1/profile')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({
+        income: 10000,
+        debts: [{ amount: 5000 }], // missing 'type'
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.success).toBe(false);
+  });
+
   it('should return 500 when financialService throws', async () => {
     financialService.upsertFinancials.mockRejectedValue(new Error('Firestore write failed'));
 
@@ -205,6 +232,91 @@ describe('PUT /api/v1/profile', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.success).toBe(false);
+  });
+
+  it('should call upsertFinancials with the correct userId', async () => {
+    financialService.upsertFinancials.mockResolvedValue(sampleFinancial);
+
+    await request(app)
+      .put('/api/v1/profile')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ income: 15000 });
+
+    expect(financialService.upsertFinancials).toHaveBeenCalledWith(
+      'firestore-uid-test-001',
+      expect.any(Object)
+    );
+  });
+});
+
+// ── PATCH /api/v1/profile ─────────────────────────────────────────────────────
+
+describe('PATCH /api/v1/profile', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('should return 200 and partially updated financial data', async () => {
+    const patchedFinancial = { ...sampleFinancial, income: 20000 };
+    financialService.updateFinancials.mockResolvedValue(patchedFinancial);
+
+    const res = await request(app)
+      .patch('/api/v1/profile')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ income: 20000 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.income).toBe(20000);
+    expect(res.body.message).toMatch(/partially updated/i);
+    expect(financialService.updateFinancials).toHaveBeenCalledWith(
+      'firestore-uid-test-001',
+      expect.objectContaining({ income: 20000 })
+    );
+  });
+
+  it('should return 422 when body is empty', async () => {
+    const res = await request(app)
+      .patch('/api/v1/profile')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.status).toBe(422);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('should return 422 when income is negative', async () => {
+    const res = await request(app)
+      .patch('/api/v1/profile')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ income: -500 });
+
+    expect(res.status).toBe(422);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('should return 500 when financialService throws', async () => {
+    financialService.updateFinancials.mockRejectedValue(new Error('Firestore patch failed'));
+
+    const res = await request(app)
+      .patch('/api/v1/profile')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ income: 10000 });
+
+    expect(res.status).toBe(500);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('should only pass provided fields to updateFinancials', async () => {
+    financialService.updateFinancials.mockResolvedValue(sampleFinancial);
+
+    await request(app)
+      .patch('/api/v1/profile')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ additionalIncome: 500 });
+
+    expect(financialService.updateFinancials).toHaveBeenCalledWith(
+      'firestore-uid-test-001',
+      { additionalIncome: 500 }
+    );
   });
 });
 
@@ -256,5 +368,21 @@ describe('financialService.buildFinancialData (unit)', () => {
   it('should default debts to empty array when not provided', () => {
     const result = buildFinancialData('user-123', { income: 10000 });
     expect(result.debts).toEqual([]);
+  });
+
+  it('should set updatedAt to a valid ISO string', () => {
+    const result = buildFinancialData('user-123', { income: 5000 });
+    expect(() => new Date(result.updatedAt)).not.toThrow();
+    expect(new Date(result.updatedAt).toISOString()).toBe(result.updatedAt);
+  });
+
+  it('should handle missing nested objects gracefully', () => {
+    const result = buildFinancialData('user-123', {
+      income: 10000,
+      expenses: undefined,
+      assets: undefined,
+    });
+    expect(result.expenses).toEqual({ housing: 0, loans: 0, other: 0 });
+    expect(result.assets).toEqual({ savings: 0, investments: 0 });
   });
 });
