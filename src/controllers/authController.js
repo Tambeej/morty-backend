@@ -7,6 +7,34 @@
  * All database operations are delegated to userService (Firestore-backed).
  * Tokens are generated/verified via the jwt utility module.
  * Responses follow the standard { data, message } envelope via response helpers.
+ *
+ * ## Auth Payload Contract (frontend-compatible)
+ *
+ * Every successful authentication endpoint returns the following structure,
+ * which is consumed by the frontend `authService` (authService.js) and stored
+ * in localStorage via the storage utilities:
+ *
+ * ```json
+ * {
+ *   "success": true,
+ *   "message": "...",
+ *   "data": {
+ *     "token":        "<JWT access token  – 15m expiry>",
+ *     "refreshToken": "<JWT refresh token – 7d  expiry>",
+ *     "user": {
+ *       "id":       "<Firestore document ID>",
+ *       "email":    "user@example.com",
+ *       "phone":    "+972501234567",
+ *       "verified": true
+ *     }
+ *   },
+ *   "timestamp": "<ISO 8601>"
+ * }
+ * ```
+ *
+ * The refresh token is persisted in Firestore (`users/{id}.refreshToken`) so
+ * that it can be validated and rotated on subsequent `/auth/refresh` calls.
+ * Only one refresh token is stored per user at a time (single-session model).
  */
 
 'use strict';
@@ -22,10 +50,18 @@ const logger = require('../utils/logger');
 /**
  * Build the public auth response payload.
  *
- * @param {string} token        - JWT access token
- * @param {string} refreshToken - JWT refresh token
+ * This is the canonical shape consumed by the frontend `authService`:
+ *   - `authService.login()` reads `response.data?.data || response.data`
+ *   - `authService.register()` reads the same envelope
+ *   - `authService.googleLogin()` reads the same envelope
+ *
+ * The `user` sub-object is intentionally minimal (id, email, phone, verified)
+ * to avoid leaking sensitive fields (password hash, refreshToken, firebaseUid).
+ *
+ * @param {string} token        - JWT access token (short-lived, 15m)
+ * @param {string} refreshToken - JWT refresh token (long-lived, 7d; also persisted in Firestore)
  * @param {Object} user         - Public user object (no password/refreshToken)
- * @returns {Object}
+ * @returns {{ token: string, refreshToken: string, user: { id: string, email: string, phone: string, verified: boolean } }}
  */
 function buildAuthPayload(token, refreshToken, user) {
   return {
@@ -242,18 +278,43 @@ exports.me = async (req, res) => {
  * POST /api/v1/auth/google
  *
  * Verifies a Firebase ID token obtained from Google sign-in on the client.
- * On success, finds or creates the corresponding Firestore user document
- * and issues custom access + refresh JWT tokens compatible with the
- * existing auth flow.
+ * On success, finds or creates the corresponding Firestore user document,
+ * generates custom JWT tokens, persists the refresh token in Firestore,
+ * and returns the standard auth payload compatible with the existing frontend.
  *
- * Request body:
+ * ## Flow
+ * 1. Validate request body (idToken must be a non-empty string).
+ * 2. Verify the Firebase ID token via Admin SDK (checks signature, audience,
+ *    issuer, expiry; rejects replayed or tampered tokens).
+ * 3. Extract verified claims: uid, email, email_verified, name.
+ * 4. Find or create the Firestore user document via userService
+ *    (handles account linking for existing email/password users).
+ * 5. Generate custom access token (15m) and refresh token (7d).
+ * 6. **Persist the refresh token in Firestore** (`users/{id}.refreshToken`).
+ * 7. Return the standard auth payload (same shape as /auth/login).
+ *
+ * ## Request body
  *   { idToken: string }  – Firebase ID token from firebaseUser.getIdToken()
  *
- * Response (200):
- *   { data: { token, refreshToken, user: { id, email, phone, verified } } }
+ * ## Response (200)
+ *   {
+ *     success: true,
+ *     data: {
+ *       token:        string,  // JWT access token (15m)
+ *       refreshToken: string,  // JWT refresh token (7d) – also stored in Firestore
+ *       user: {
+ *         id:       string,   // Firestore document ID
+ *         email:    string,
+ *         phone:    string,
+ *         verified: boolean
+ *       }
+ *     }
+ *   }
  *
- * Error codes:
+ * ## Error codes
  *   401 INVALID_FIREBASE_TOKEN  – token verification failed (expired, invalid, etc.)
+ *   409 CONFLICT_ERROR          – email linked to a different Google account
+ *   422 MISSING_EMAIL           – Firebase token has no email claim
  *   500 GOOGLE_AUTH_ERROR       – unexpected server-side failure
  *
  * @param {import('express').Request}  req
@@ -296,10 +357,10 @@ exports.googleAuth = async (req, res) => {
     }
 
     // ── Step 3: Find or create the Firestore user ─────────────────────────────
-    // Delegate to userService (implemented in a subsequent task).
-    // For this task we only wire up the token verification layer;
-    // the service call is included so the route is fully functional
-    // once userService.findOrCreateByFirebaseUser is available.
+    // Handles three cases:
+    //   a) Returning Google user (found by firebaseUid) – fast path
+    //   b) Existing email/password user linking Google for the first time
+    //   c) Brand-new Google user – creates a passwordless document
     const publicUser = await userService.findOrCreateByFirebaseUser({
       email,
       firebaseUid,
@@ -308,16 +369,26 @@ exports.googleAuth = async (req, res) => {
     });
 
     // ── Step 4: Issue custom JWTs ─────────────────────────────────────────────
+    // Access token: short-lived (15m) – used for API authentication
+    // Refresh token: long-lived (7d)  – used to rotate access tokens
     const token = generateAccessToken({ id: publicUser.id });
     const refreshToken = generateRefreshToken({ id: publicUser.id });
 
-    // ── Step 5: Persist refresh token ────────────────────────────────────────
+    // ── Step 5: Persist refresh token in Firestore ────────────────────────────
+    // Stores the refresh token in users/{id}.refreshToken so that:
+    //   - POST /auth/refresh can validate the token matches what was issued
+    //   - POST /auth/logout can invalidate the token server-side
+    //   - Only one active session per user is maintained (single-session model)
     await userService.setRefreshToken(publicUser.id, refreshToken);
 
     logger.info(
       `authController.googleAuth: Google sign-in successful for user ${publicUser.id} (${email})`
     );
 
+    // ── Step 6: Return frontend-compatible auth payload ───────────────────────
+    // Shape: { data: { token, refreshToken, user: { id, email, phone, verified } } }
+    // This matches the payload consumed by frontend authService.googleLogin()
+    // which reads response.data?.data and dispatches AUTH_SUCCESS to AuthContext.
     return sendSuccess(
       res,
       buildAuthPayload(token, refreshToken, publicUser),
