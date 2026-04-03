@@ -10,6 +10,11 @@ cp .env.example .env   # fill in your values
 npm run dev
 ```
 
+## API Documentation
+
+Full API reference with request/response shapes, error codes, and frontend
+integration examples: **[docs/API.md](./docs/API.md)**
+
 ## API Base URL
 
 `/api/v1`
@@ -25,6 +30,7 @@ npm run dev
 | GET | /auth/me | ✓ | Get current user |
 | GET | /profile | ✓ | Get financial profile |
 | PUT | /profile | ✓ | Upsert financial profile |
+| PATCH | /profile | ✓ | Partially update financial profile |
 | POST | /offers | ✓ | Upload mortgage offer file |
 | GET | /offers | ✓ | List offers (paginated) |
 | GET | /offers/stats | ✓ | Offer statistics |
@@ -33,6 +39,16 @@ npm run dev
 | GET | /analysis/:id | ✓ | Get AI analysis results |
 | GET | /dashboard | ✓ | Dashboard summary |
 | GET | /health | – | Health check |
+
+## Response Envelope
+
+All responses use a consistent JSON envelope:
+
+```json
+{ "success": true, "data": { ... }, "message": "..." }
+```
+
+See [docs/API.md](./docs/API.md) for full details.
 
 ## Environment Variables
 
