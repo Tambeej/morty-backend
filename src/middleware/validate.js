@@ -4,6 +4,9 @@
  * Exports individual schemas and a validate() middleware factory.
  * All schemas are used via the validate() factory which returns a
  * standard 422 response on validation failure.
+ *
+ * The error response format is consistent with the global error handler:
+ * { success: false, error: { code, message, details, timestamp } }
  */
 
 'use strict';
@@ -14,7 +17,8 @@ const Joi = require('joi');
 
 /**
  * Middleware factory: validates req.body against the given Joi schema.
- * Returns 422 with error details on failure.
+ * Returns 422 with error details on failure, using the standard AppError
+ * response envelope for consistency.
  *
  * @param {Joi.Schema} schema - Joi schema to validate against
  * @returns {import('express').RequestHandler}
@@ -23,7 +27,6 @@ const validate = (schema) => (req, res, next) => {
   const { error, value } = schema.validate(req.body, {
     abortEarly: false,
     stripUnknown: true,
-    // Allow empty objects (defaults will be applied by the schema)
     allowUnknown: false,
   });
 
@@ -34,8 +37,12 @@ const validate = (schema) => (req, res, next) => {
     }));
     return res.status(422).json({
       success: false,
-      message: 'Validation failed',
-      errors: details,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Validation failed',
+        details,
+        timestamp: new Date().toISOString(),
+      },
     });
   }
 
@@ -92,8 +99,14 @@ const financialSchema = Joi.object({
     savings: Joi.number().min(0).default(0),
     investments: Joi.number().min(0).default(0),
   }).default({ savings: 0, investments: 0 }),
-  debts: Joi.array().items(debtItemSchema).default([]),
+  debts: Joi.array().items(debtItemSchema).max(20).default([]),
 });
+
+/**
+ * Alias for backward-compatibility with existing test files and controllers
+ * that reference `financialDataSchema`.
+ */
+const financialDataSchema = financialSchema;
 
 /**
  * Partial financial profile schema (used for PATCH – partial update).
@@ -113,7 +126,7 @@ const patchFinancialSchema = Joi.object({
     savings: Joi.number().min(0),
     investments: Joi.number().min(0),
   }),
-  debts: Joi.array().items(debtItemSchema),
+  debts: Joi.array().items(debtItemSchema).max(20),
 }).min(1).messages({
   'object.min': 'At least one financial field must be provided',
 });
@@ -126,5 +139,6 @@ module.exports = {
   loginSchema,
   refreshSchema,
   financialSchema,
+  financialDataSchema,
   patchFinancialSchema,
 };

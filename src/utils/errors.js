@@ -4,8 +4,8 @@
  * Provides a hierarchy of operational errors that map to HTTP status codes,
  * plus utility helpers (asyncHandler) used throughout controllers.
  *
- * NOTE: handleMongooseError has been removed as part of the Firestore
- * migration (Mongoose/MongoDB dependency removed in task 1).
+ * NOTE: Mongoose/MongoDB-specific error handling has been removed as part of
+ * the Firestore migration. Firestore errors are handled in errorHandler.js.
  */
 
 // ── Base error ────────────────────────────────────────────────────────────────
@@ -91,6 +91,25 @@ class InternalServerError extends AppError {
   }
 }
 
+/**
+ * 415 Unsupported Media Type – used when an uploaded file has a disallowed
+ * MIME type or extension.
+ */
+class UnsupportedMediaTypeError extends AppError {
+  constructor(message = 'Unsupported media type') {
+    super(message, 415, 'UNSUPPORTED_MEDIA_TYPE');
+  }
+}
+
+/**
+ * 429 Too Many Requests – used by rate-limiting middleware.
+ */
+class RateLimitError extends AppError {
+  constructor(message = 'Too many requests, please try again later') {
+    super(message, 429, 'RATE_LIMIT_EXCEEDED');
+  }
+}
+
 // ── JWT error handler ─────────────────────────────────────────────────────────
 
 /**
@@ -110,6 +129,53 @@ const handleJWTError = (err) => {
     return new AuthenticationError('Token not yet valid');
   }
   return null;
+};
+
+/**
+ * Convert a Firestore / Google Cloud error into an AppError where possible.
+ *
+ * Firestore errors carry a `code` property (gRPC status code string) and
+ * a `details` string.  We map the most common ones to HTTP-friendly errors.
+ *
+ * @param {Error} err
+ * @returns {AppError|null}
+ */
+const handleFirestoreError = (err) => {
+  if (!err || !err.code) return null;
+
+  // gRPC status codes used by the Firestore Admin SDK
+  switch (err.code) {
+    case 5:   // NOT_FOUND
+    case 'NOT_FOUND':
+      return new NotFoundError('Firestore document');
+
+    case 6:   // ALREADY_EXISTS
+    case 'ALREADY_EXISTS':
+      return new ConflictError('Document already exists');
+
+    case 7:   // PERMISSION_DENIED
+    case 'PERMISSION_DENIED':
+      return new AuthorizationError('Firestore permission denied');
+
+    case 16:  // UNAUTHENTICATED
+    case 'UNAUTHENTICATED':
+      return new AuthenticationError('Firestore authentication failed');
+
+    case 8:   // RESOURCE_EXHAUSTED (quota)
+    case 'RESOURCE_EXHAUSTED':
+      return new RateLimitError('Firestore quota exceeded');
+
+    case 4:   // DEADLINE_EXCEEDED
+    case 'DEADLINE_EXCEEDED':
+      return new InternalServerError('Firestore request timed out');
+
+    case 14:  // UNAVAILABLE
+    case 'UNAVAILABLE':
+      return new InternalServerError('Firestore service temporarily unavailable');
+
+    default:
+      return null;
+  }
 };
 
 // ── Async handler ─────────────────────────────────────────────────────────────
@@ -137,6 +203,9 @@ module.exports = {
   UnauthorizedError,
   PayloadTooLargeError,
   InternalServerError,
+  UnsupportedMediaTypeError,
+  RateLimitError,
   handleJWTError,
+  handleFirestoreError,
   asyncHandler,
 };

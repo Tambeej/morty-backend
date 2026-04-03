@@ -5,13 +5,22 @@
  *
  * Must be registered LAST in the Express middleware stack.
  *
- * NOTE: Mongoose-specific error handling has been removed as part of the
- * Firestore migration (task 1). Firestore errors will be handled in
- * subsequent tasks.
+ * Handles:
+ * - AppError subclasses (operational errors)
+ * - JWT errors (JsonWebTokenError, TokenExpiredError)
+ * - Firestore / Google Cloud gRPC errors
+ * - Multer file-upload errors
+ * - Body-parser errors (malformed JSON, payload too large)
+ * - CORS errors
+ * - Unknown errors (wrapped as InternalServerError)
  */
 
 const logger = require('../utils/logger');
-const { AppError, handleJWTError } = require('../utils/errors');
+const {
+  AppError,
+  handleJWTError,
+  handleFirestoreError,
+} = require('../utils/errors');
 
 /**
  * Determine if we should expose error details to the client.
@@ -29,7 +38,7 @@ const shouldExposeDetails = (err) => {
 /**
  * Format error response body.
  *
- * @param {Error} err       - The error
+ * @param {Error} err        - The error
  * @param {string} requestId - Request ID for tracing
  * @returns {Object} JSON response body
  */
@@ -125,34 +134,38 @@ const globalErrorHandler = (err, req, res, next) => {
   let error = err;
 
   if (!(error instanceof AppError)) {
-    // Try JWT errors
+    // 1. Try JWT errors
     const jwtError = handleJWTError(error);
     if (jwtError) {
       error = jwtError;
     }
-    // Try Multer errors
+    // 2. Try Firestore / Google Cloud gRPC errors
+    else if (handleFirestoreError(error)) {
+      error = handleFirestoreError(error);
+    }
+    // 3. Try Multer errors
     else if (error.name === 'MulterError') {
       const multerError = handleMulterError(error);
       if (multerError) {
         error = multerError;
       }
     }
-    // Handle CORS errors
+    // 4. Handle CORS errors
     else if (error.message && error.message.startsWith('CORS:')) {
       const { AuthorizationError } = require('../utils/errors');
       error = new AuthorizationError(error.message);
     }
-    // Handle body parser errors (malformed JSON)
+    // 5. Handle body parser errors (malformed JSON)
     else if (error.type === 'entity.parse.failed') {
       const { ValidationError } = require('../utils/errors');
       error = new ValidationError('Invalid JSON in request body');
     }
-    // Handle payload too large from body parser
+    // 6. Handle payload too large from body parser
     else if (error.type === 'entity.too.large') {
       const { PayloadTooLargeError } = require('../utils/errors');
       error = new PayloadTooLargeError('Request body too large');
     }
-    // Unknown errors – wrap as internal server error
+    // 7. Unknown errors – wrap as internal server error
     else {
       const { InternalServerError } = require('../utils/errors');
       const internalError = new InternalServerError(
