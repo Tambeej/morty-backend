@@ -66,9 +66,27 @@ app.use((err, _req, res, _next) => {
 const PORT = process.env.PORT || 5000;
 
 const start = async () => {
-  // NOTE: Database connection (Firestore) will be initialised in task 3.
-  // The MongoDB/Mongoose connection has been removed as part of the
-  // Firestore migration.
+  try {
+    // Initialise Firestore – the module is required here so that any
+    // credential errors surface at startup rather than on first request.
+    const db = require('./config/firestore');
+    const projectId =
+      process.env.FIREBASE_PROJECT_ID ||
+      process.env.GCLOUD_PROJECT ||
+      process.env.GOOGLE_CLOUD_PROJECT ||
+      'unknown';
+    logger.info(`Firestore connected (project: ${projectId})`);
+
+    // Attach db to app locals so controllers can access it if needed
+    app.locals.db = db;
+  } catch (err) {
+    logger.error(`Failed to initialise Firestore: ${err.message}`);
+    // In production, exit so the process manager can restart with correct creds
+    if (process.env.NODE_ENV === 'production') {
+      process.exit(1);
+    }
+  }
+
   app.listen(PORT, () => {
     logger.info(`Morty backend running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
   });

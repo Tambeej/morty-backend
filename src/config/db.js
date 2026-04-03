@@ -1,22 +1,14 @@
 /**
- * Database configuration stub.
+ * Database configuration – Firestore migration shim.
  *
- * MongoDB/Mongoose has been removed. This file is kept as a placeholder
- * during the migration to Firestore. It will be replaced by
- * src/config/firestore.js in a subsequent task.
+ * This file previously contained the Mongoose/MongoDB connection.
+ * It now re-exports the Firestore `db` instance from `firestore.js`
+ * so that any code still importing `db.js` continues to work without
+ * modification during the incremental migration.
  *
- * The connectDB export is a no-op so that any code still importing it
- * does not crash before the Firestore wiring is complete.
+ * New code should import directly from `./firestore`.
  */
 
-const logger = require('../utils/logger');
+const db = require('./firestore');
 
-/**
- * No-op database initialiser.
- * Will be replaced by Firestore initialisation in task 3.
- */
-const connectDB = async () => {
-  logger.info('Database: Mongoose/MongoDB removed. Firestore will be configured in the next step.');
-};
-
-module.exports = connectDB;
+module.exports = db;
