@@ -1,19 +1,14 @@
 /**
- * MongoDB connection via Mongoose
+ * Database configuration – Firestore migration shim.
+ *
+ * This file previously contained the Mongoose/MongoDB connection.
+ * It now re-exports the Firestore `db` instance from `firestore.js`
+ * so that any code still importing `db.js` continues to work without
+ * modification during the incremental migration.
+ *
+ * New code should import directly from `./firestore`.
  */
-const mongoose = require('mongoose');
-const logger = require('../utils/logger');
 
-const connectDB = async () => {
-  try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI, {
-      serverSelectionTimeoutMS: 5000,
-    });
-    logger.info(`MongoDB connected: ${conn.connection.host}`);
-  } catch (err) {
-    logger.error(`MongoDB connection error: ${err.message}`);
-    process.exit(1);
-  }
-};
+const db = require('./firestore');
 
-module.exports = connectDB;
+module.exports = db;

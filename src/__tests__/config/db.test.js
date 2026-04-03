@@ -1,37 +1,54 @@
 /**
- * Database Connection Tests
- * Tests for MongoDB connection configuration and error handling.
+ * Database Configuration Tests
+ *
+ * Verifies that db.js correctly re-exports the Firestore db instance
+ * from firestore.js (migration shim).
  */
 
-describe('Database Configuration', () => {
-  const originalEnv = process.env;
+describe('Database Configuration (Firestore shim)', () => {
+  let mockDb;
+  let mockAdmin;
 
   beforeEach(() => {
     jest.resetModules();
-    process.env = { ...originalEnv };
+
+    mockDb = {
+      settings: jest.fn(),
+      collection: jest.fn().mockReturnThis(),
+    };
+
+    mockAdmin = {
+      apps: [],
+      credential: {
+        applicationDefault: jest.fn().mockReturnValue({ type: 'applicationDefault' }),
+        cert: jest.fn().mockReturnValue({ type: 'cert' }),
+      },
+      initializeApp: jest.fn(),
+      firestore: jest.fn().mockReturnValue(mockDb),
+    };
+
+    jest.mock('firebase-admin', () => mockAdmin);
+
+    // Provide credentials so firestore.js does not throw
+    process.env.FIREBASE_PROJECT_ID = 'test-project';
+    process.env.FIREBASE_CLIENT_EMAIL = 'sa@test-project.iam.gserviceaccount.com';
+    process.env.FIREBASE_PRIVATE_KEY = 'test-private-key';
   });
 
   afterEach(() => {
-    process.env = originalEnv;
+    jest.clearAllMocks();
+    delete process.env.FIREBASE_PROJECT_ID;
+    delete process.env.FIREBASE_CLIENT_EMAIL;
+    delete process.env.FIREBASE_PRIVATE_KEY;
   });
 
-  it('should export a connectDB function', () => {
-    const connectDB = require('../../config/db');
-    expect(typeof connectDB).toBe('function');
+  it('re-exports the Firestore db instance from firestore.js', () => {
+    const db = require('../../config/db');
+    expect(db).toBe(mockDb);
   });
 
-  it('should exit process if MONGODB_URI is not set', async () => {
-    delete process.env.MONGODB_URI;
-
-    const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => {
-      throw new Error('process.exit called');
-    });
-
-    const connectDB = require('../../config/db');
-
-    await expect(connectDB()).rejects.toThrow('process.exit called');
-    expect(mockExit).toHaveBeenCalledWith(1);
-
-    mockExit.mockRestore();
+  it('exports an object with a collection method (Firestore interface)', () => {
+    const db = require('../../config/db');
+    expect(typeof db.collection).toBe('function');
   });
 });

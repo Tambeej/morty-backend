@@ -2,11 +2,15 @@
  * Tests for error handling, validation, and security middleware.
  *
  * Tests cover:
- * - Custom error classes
+ * - Custom error classes (Firestore-compatible)
  * - Validation middleware with Joi schemas
- * - Security middleware (sanitization, rate limiting)
- * - Global error handler
+ * - Security middleware (sanitization, file validation)
+ * - Global error handler (JWT, Firestore, Multer, body-parser errors)
  * - Authentication middleware
+ * - Response helpers
+ *
+ * NOTE: Mongoose/MongoDB-specific tests have been removed as part of the
+ * Firestore migration. handleMongooseError no longer exists.
  */
 
 const request = require('supertest');
@@ -18,14 +22,17 @@ const {
   AuthorizationError,
   NotFoundError,
   ConflictError,
+  UnsupportedMediaTypeError,
+  RateLimitError,
   asyncHandler,
-  handleMongooseError,
+  handleFirestoreError,
 } = require('../utils/errors');
 const { globalErrorHandler, notFoundHandler } = require('../middleware/errorHandler');
 const {
   validate,
   registerSchema,
   loginSchema,
+  financialSchema,
   financialDataSchema,
 } = require('../middleware/validate');
 const {
@@ -142,6 +149,22 @@ describe('Error Classes', () => {
     });
   });
 
+  describe('UnsupportedMediaTypeError', () => {
+    it('should have 415 status code', () => {
+      const err = new UnsupportedMediaTypeError('Only PDF files are allowed');
+      expect(err.statusCode).toBe(415);
+      expect(err.errorCode).toBe('UNSUPPORTED_MEDIA_TYPE');
+    });
+  });
+
+  describe('RateLimitError', () => {
+    it('should have 429 status code', () => {
+      const err = new RateLimitError();
+      expect(err.statusCode).toBe(429);
+      expect(err.errorCode).toBe('RATE_LIMIT_EXCEEDED');
+    });
+  });
+
   describe('asyncHandler', () => {
     it('should catch async errors and pass to next', async () => {
       const app = express();
@@ -178,31 +201,42 @@ describe('Error Classes', () => {
     });
   });
 
-  describe('handleMongooseError', () => {
-    it('should handle duplicate key errors', () => {
-      const mongoErr = {
-        code: 11000,
-        keyValue: { email: 'test@example.com' },
-      };
-      const err = handleMongooseError(mongoErr);
-      expect(err).toBeInstanceOf(ConflictError);
-      expect(err.statusCode).toBe(409);
-      expect(err.message).toContain('email');
+  describe('handleFirestoreError', () => {
+    it('should handle NOT_FOUND gRPC code (5)', () => {
+      const firestoreErr = { code: 5, message: 'Document not found' };
+      const err = handleFirestoreError(firestoreErr);
+      expect(err).toBeInstanceOf(NotFoundError);
+      expect(err.statusCode).toBe(404);
     });
 
-    it('should handle cast errors', () => {
-      const mongoErr = {
-        name: 'CastError',
-        path: 'id',
-        value: 'invalid-id',
-      };
-      const err = handleMongooseError(mongoErr);
-      expect(err).toBeInstanceOf(ValidationError);
-      expect(err.statusCode).toBe(400);
+    it('should handle ALREADY_EXISTS gRPC code (6)', () => {
+      const firestoreErr = { code: 6, message: 'Document already exists' };
+      const err = handleFirestoreError(firestoreErr);
+      expect(err).toBeInstanceOf(ConflictError);
+      expect(err.statusCode).toBe(409);
+    });
+
+    it('should handle PERMISSION_DENIED gRPC code (7)', () => {
+      const firestoreErr = { code: 7, message: 'Permission denied' };
+      const err = handleFirestoreError(firestoreErr);
+      expect(err).toBeInstanceOf(AuthorizationError);
+      expect(err.statusCode).toBe(403);
+    });
+
+    it('should handle UNAUTHENTICATED gRPC code (16)', () => {
+      const firestoreErr = { code: 16, message: 'Unauthenticated' };
+      const err = handleFirestoreError(firestoreErr);
+      expect(err).toBeInstanceOf(AuthenticationError);
+      expect(err.statusCode).toBe(401);
     });
 
     it('should return null for unknown errors', () => {
-      const err = handleMongooseError({ code: 999 });
+      const err = handleFirestoreError({ message: 'unknown' });
+      expect(err).toBeNull();
+    });
+
+    it('should return null for null input', () => {
+      const err = handleFirestoreError(null);
       expect(err).toBeNull();
     });
   });
@@ -242,7 +276,7 @@ describe('Validation Middleware', () => {
         password: 'Password123',
       });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(422);
       expect(res.body.error.code).toBe('VALIDATION_ERROR');
       expect(res.body.error.details).toEqual(
         expect.arrayContaining([
@@ -257,7 +291,7 @@ describe('Validation Middleware', () => {
         password: 'weak',
       });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(422);
       expect(res.body.error.details).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ field: 'password' }),
@@ -268,7 +302,7 @@ describe('Validation Middleware', () => {
     it('should reject missing required fields', async () => {
       const res = await request(app).post('/test').send({});
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(422);
       expect(res.body.error.details.length).toBeGreaterThan(0);
     });
 
@@ -320,11 +354,11 @@ describe('Validation Middleware', () => {
         email: 'test@example.com',
       });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(422);
     });
   });
 
-  describe('financialDataSchema', () => {
+  describe('financialDataSchema (alias for financialSchema)', () => {
     let app;
 
     beforeEach(() => {
@@ -352,7 +386,7 @@ describe('Validation Middleware', () => {
         income: -1000,
       });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(422);
     });
 
     it('should apply defaults for missing optional fields', async () => {
@@ -365,14 +399,21 @@ describe('Validation Middleware', () => {
       expect(res.body.data.debts).toEqual([]);
     });
 
-    it('should reject too many debt entries', async () => {
+    it('should reject too many debt entries (max 20)', async () => {
       const debts = Array.from({ length: 21 }, (_, i) => ({
         type: `debt ${i}`,
         amount: 1000,
       }));
 
       const res = await request(app).put('/test').send({ debts });
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(422);
+    });
+  });
+
+  describe('financialSchema (direct reference)', () => {
+    it('should be the same schema as financialDataSchema', () => {
+      // Both exports should reference the same Joi schema object
+      expect(financialSchema).toBe(financialDataSchema);
     });
   });
 });
@@ -394,7 +435,7 @@ describe('Security Middleware', () => {
       });
     });
 
-    it('should remove MongoDB operator keys', async () => {
+    it('should remove MongoDB/NoSQL operator keys ($ prefix)', async () => {
       const res = await request(app).post('/test').send({
         email: 'test@example.com',
         $where: 'malicious code',
@@ -565,19 +606,40 @@ describe('Global Error Handler', () => {
     expect(res.status).toBe(400);
   });
 
-  it('should handle MongoDB duplicate key error', async () => {
+  it('should handle Firestore NOT_FOUND error (gRPC code 5)', async () => {
     app.get('/test', (req, res, next) => {
-      const mongoErr = {
-        code: 11000,
-        keyValue: { email: 'test@example.com' },
-      };
-      next(mongoErr);
+      const firestoreErr = { code: 5, message: 'Document not found' };
+      next(firestoreErr);
+    });
+    app.use(globalErrorHandler);
+
+    const res = await request(app).get('/test');
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('NOT_FOUND');
+  });
+
+  it('should handle Firestore ALREADY_EXISTS error (gRPC code 6)', async () => {
+    app.get('/test', (req, res, next) => {
+      const firestoreErr = { code: 6, message: 'Document already exists' };
+      next(firestoreErr);
     });
     app.use(globalErrorHandler);
 
     const res = await request(app).get('/test');
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('CONFLICT_ERROR');
+  });
+
+  it('should handle Firestore PERMISSION_DENIED error (gRPC code 7)', async () => {
+    app.get('/test', (req, res, next) => {
+      const firestoreErr = { code: 7, message: 'Permission denied' };
+      next(firestoreErr);
+    });
+    app.use(globalErrorHandler);
+
+    const res = await request(app).get('/test');
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('AUTHORIZATION_ERROR');
   });
 
   it('should include requestId in error response', async () => {
@@ -606,6 +668,32 @@ describe('Global Error Handler', () => {
     expect(res.body.error).toHaveProperty('code');
     expect(res.body.error).toHaveProperty('message');
     expect(res.body.error).toHaveProperty('timestamp');
+  });
+
+  it('should handle JWT expired error', async () => {
+    app.get('/test', (req, res, next) => {
+      const jwtErr = new Error('jwt expired');
+      jwtErr.name = 'TokenExpiredError';
+      next(jwtErr);
+    });
+    app.use(globalErrorHandler);
+
+    const res = await request(app).get('/test');
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('AUTHENTICATION_ERROR');
+  });
+
+  it('should handle JWT invalid error', async () => {
+    app.get('/test', (req, res, next) => {
+      const jwtErr = new Error('invalid signature');
+      jwtErr.name = 'JsonWebTokenError';
+      next(jwtErr);
+    });
+    app.use(globalErrorHandler);
+
+    const res = await request(app).get('/test');
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('AUTHENTICATION_ERROR');
   });
 });
 
