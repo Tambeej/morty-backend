@@ -72,14 +72,14 @@ function initFirestore() {
     });
 
     logger.info('Firebase Admin SDK initialised successfully');
+
+    const db = admin.firestore();
+    db.settings({ ignoreUndefinedProperties: true });
+
+    return db;
+  } else {
+    return admin.firestore();
   }
-
-  const db = admin.firestore();
-
-  // Use ISO-8601 timestamps (Timestamp → Date) for consistent serialisation
-  db.settings({ ignoreUndefinedProperties: true });
-
-  return db;
 }
 
 /** Singleton Firestore instance shared across the application. */
