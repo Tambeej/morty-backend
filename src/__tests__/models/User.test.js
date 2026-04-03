@@ -1,215 +1,46 @@
 /**
- * User Model Tests
- * Tests for User schema validation, password hashing, and instance methods.
+ * User Schema Definition Tests
+ *
+ * Verifies the plain-JS UserSchema descriptor that replaced the Mongoose
+ * model during the Firestore migration.
  */
 
-const mongoose = require('mongoose');
-const User = require('../../models/User');
+const UserSchema = require('../../models/User');
 
-// Mock mongoose to avoid actual DB connection in unit tests
-jest.mock('mongoose', () => {
-  const actualMongoose = jest.requireActual('mongoose');
-  return actualMongoose;
-});
-
-describe('User Model', () => {
-  beforeAll(async () => {
-    // Connect to in-memory MongoDB for testing
-    const mongoUri = process.env.MONGODB_TEST_URI || 'mongodb://localhost:27017/morty_test';
-    try {
-      await mongoose.connect(mongoUri);
-    } catch (err) {
-      // Skip DB tests if no test DB available
-      console.warn('Test DB not available, skipping DB tests');
-    }
+describe('UserSchema (Firestore shape descriptor)', () => {
+  it('should export a schema object', () => {
+    expect(UserSchema).toBeDefined();
+    expect(typeof UserSchema).toBe('object');
   });
 
-  afterAll(async () => {
-    try {
-      await mongoose.connection.dropDatabase();
-      await mongoose.connection.close();
-    } catch (err) {
-      // Ignore cleanup errors
-    }
+  it('should target the correct Firestore collection', () => {
+    expect(UserSchema.collection).toBe('users');
   });
 
-  afterEach(async () => {
-    try {
-      await User.deleteMany({});
-    } catch (err) {
-      // Ignore cleanup errors
-    }
+  it('should define required fields', () => {
+    const { fields } = UserSchema;
+    expect(fields.id.required).toBe(true);
+    expect(fields.email.required).toBe(true);
+    expect(fields.password.required).toBe(true);
   });
 
-  describe('Schema Validation', () => {
-    it('should require email field', async () => {
-      const user = new User({
-        password: 'Password123!',
-        fullName: 'Test User',
-      });
-
-      let error;
-      try {
-        await user.validate();
-      } catch (err) {
-        error = err;
-      }
-
-      expect(error).toBeDefined();
-      expect(error.errors.email).toBeDefined();
-    });
-
-    it('should require password field', async () => {
-      const user = new User({
-        email: 'test@example.com',
-        fullName: 'Test User',
-      });
-
-      let error;
-      try {
-        await user.validate();
-      } catch (err) {
-        error = err;
-      }
-
-      expect(error).toBeDefined();
-      expect(error.errors.password).toBeDefined();
-    });
-
-    it('should require fullName field', async () => {
-      const user = new User({
-        email: 'test@example.com',
-        password: 'Password123!',
-      });
-
-      let error;
-      try {
-        await user.validate();
-      } catch (err) {
-        error = err;
-      }
-
-      expect(error).toBeDefined();
-      expect(error.errors.fullName).toBeDefined();
-    });
-
-    it('should reject invalid email format', async () => {
-      const user = new User({
-        email: 'not-an-email',
-        password: 'Password123!',
-        fullName: 'Test User',
-      });
-
-      let error;
-      try {
-        await user.validate();
-      } catch (err) {
-        error = err;
-      }
-
-      expect(error).toBeDefined();
-      expect(error.errors.email).toBeDefined();
-    });
-
-    it('should convert email to lowercase', () => {
-      const user = new User({
-        email: 'TEST@EXAMPLE.COM',
-        password: 'Password123!',
-        fullName: 'Test User',
-      });
-
-      expect(user.email).toBe('test@example.com');
-    });
-
-    it('should set verified to false by default', () => {
-      const user = new User({
-        email: 'test@example.com',
-        password: 'Password123!',
-        fullName: 'Test User',
-      });
-
-      expect(user.verified).toBe(false);
-    });
-
-    it('should set isActive to true by default', () => {
-      const user = new User({
-        email: 'test@example.com',
-        password: 'Password123!',
-        fullName: 'Test User',
-      });
-
-      expect(user.isActive).toBe(true);
-    });
-
-    it('should validate Israeli phone number format', async () => {
-      const user = new User({
-        email: 'test@example.com',
-        password: 'Password123!',
-        fullName: 'Test User',
-        phone: 'invalid-phone',
-      });
-
-      let error;
-      try {
-        await user.validate();
-      } catch (err) {
-        error = err;
-      }
-
-      expect(error).toBeDefined();
-      expect(error.errors.phone).toBeDefined();
-    });
-
-    it('should accept valid Israeli phone number', async () => {
-      const user = new User({
-        email: 'test@example.com',
-        password: 'Password123!',
-        fullName: 'Test User',
-        phone: '+972501234567',
-      });
-
-      let error;
-      try {
-        await user.validate();
-      } catch (err) {
-        error = err;
-      }
-
-      // Phone validation should pass
-      expect(error).toBeUndefined();
-    });
+  it('should define optional fields with defaults', () => {
+    const { fields } = UserSchema;
+    expect(fields.phone.default).toBe('');
+    expect(fields.verified.default).toBe(false);
+    expect(fields.refreshToken.default).toBeNull();
   });
 
-  describe('toSafeObject method', () => {
-    it('should return user object without sensitive fields', () => {
-      const user = new User({
-        email: 'test@example.com',
-        password: 'Password123!',
-        fullName: 'Test User',
-      });
-
-      const safeObj = user.toSafeObject();
-
-      expect(safeObj.email).toBe('test@example.com');
-      expect(safeObj.fullName).toBe('Test User');
-      expect(safeObj.password).toBeUndefined();
-      expect(safeObj.refreshToken).toBeUndefined();
-    });
+  it('should mark email as unique', () => {
+    expect(UserSchema.fields.email.unique).toBe(true);
   });
 
-  describe('JSON transform', () => {
-    it('should exclude sensitive fields from JSON output', () => {
-      const user = new User({
-        email: 'test@example.com',
-        password: 'hashedpassword',
-        fullName: 'Test User',
-      });
+  it('should use string type for id and email', () => {
+    expect(UserSchema.fields.id.type).toBe('string');
+    expect(UserSchema.fields.email.type).toBe('string');
+  });
 
-      const json = user.toJSON();
-
-      expect(json.password).toBeUndefined();
-      expect(json.refreshToken).toBeUndefined();
-      expect(json.__v).toBeUndefined();
-    });
+  it('should use boolean type for verified', () => {
+    expect(UserSchema.fields.verified.type).toBe('boolean');
   });
 });

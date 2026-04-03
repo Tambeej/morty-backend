@@ -22,7 +22,6 @@
     "helmet": "^7.1.0",
     "joi": "^17.13.1",
     "jsonwebtoken": "^9.0.2",
-    "mongoose": "^8.4.1",
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^6.9.13",
@@ -36,6 +35,6 @@
   },
   "jest": {
     "testEnvironment": "node",
-    "testMatch": ["**/__tests__/**/*.test.js"]
+    "testMatch": ["**/__tests__/**/*.test.js", "**/src/tests/**/*.test.js"]
   }
 }

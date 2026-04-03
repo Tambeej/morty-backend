@@ -1,19 +1,22 @@
 /**
- * MongoDB connection via Mongoose
+ * Database configuration stub.
+ *
+ * MongoDB/Mongoose has been removed. This file is kept as a placeholder
+ * during the migration to Firestore. It will be replaced by
+ * src/config/firestore.js in a subsequent task.
+ *
+ * The connectDB export is a no-op so that any code still importing it
+ * does not crash before the Firestore wiring is complete.
  */
-const mongoose = require('mongoose');
+
 const logger = require('../utils/logger');
 
+/**
+ * No-op database initialiser.
+ * Will be replaced by Firestore initialisation in task 3.
+ */
 const connectDB = async () => {
-  try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI, {
-      serverSelectionTimeoutMS: 5000,
-    });
-    logger.info(`MongoDB connected: ${conn.connection.host}`);
-  } catch (err) {
-    logger.error(`MongoDB connection error: ${err.message}`);
-    process.exit(1);
-  }
+  logger.info('Database: Mongoose/MongoDB removed. Firestore will be configured in the next step.');
 };
 
 module.exports = connectDB;

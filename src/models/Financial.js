@@ -1,47 +1,50 @@
 /**
- * Financial profile Mongoose model
+ * Financial profile data shape definition.
+ *
+ * Mongoose has been removed. This module exports a plain-JS schema
+ * descriptor that documents the Firestore `financials` collection structure.
+ * Actual Firestore CRUD is handled by src/services/financialService.js.
+ *
+ * Firestore document shape:
+ * {
+ *   id:               string  (Firestore document ID == userId)
+ *   userId:           string  (required, indexed)
+ *   income:           number  (required, >= 0)
+ *   additionalIncome: number  (default 0)
+ *   expenses: {
+ *     housing:        number  (default 0)
+ *     loans:          number  (default 0)
+ *     other:          number  (default 0)
+ *   }
+ *   assets: {
+ *     savings:        number  (default 0)
+ *     investments:    number  (default 0)
+ *   }
+ *   debts: Array<{ type: string, amount: number }>
+ *   updatedAt:        ISO string
+ * }
  */
-const mongoose = require('mongoose');
 
-const financialSchema = new mongoose.Schema(
-  {
-    userId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: true,
-      unique: true,
-    },
-    income: {
-      type: Number,
-      required: true,
-      min: 0,
-    },
-    additionalIncome: {
-      type: Number,
-      default: 0,
-      min: 0,
-    },
+/** Field-level schema descriptor (for documentation / validation reference). */
+const FinancialSchema = {
+  collection: 'financials',
+  fields: {
+    id:               { type: 'string', required: true },
+    userId:           { type: 'string', required: true },
+    income:           { type: 'number', required: true, min: 0 },
+    additionalIncome: { type: 'number', default: 0 },
     expenses: {
-      housing: { type: Number, default: 0 },
-      loans: { type: Number, default: 0 },
-      other: { type: Number, default: 0 },
+      housing:        { type: 'number', default: 0 },
+      loans:          { type: 'number', default: 0 },
+      other:          { type: 'number', default: 0 },
     },
     assets: {
-      savings: { type: Number, default: 0 },
-      investments: { type: Number, default: 0 },
+      savings:        { type: 'number', default: 0 },
+      investments:    { type: 'number', default: 0 },
     },
-    debts: [
-      {
-        type: { type: String, required: true },
-        amount: { type: Number, required: true, min: 0 },
-      },
-    ],
-    updatedAt: {
-      type: Date,
-      default: Date.now,
-    },
+    debts:            { type: 'array',  default: [] },
+    updatedAt:        { type: 'string' },
   },
-  { timestamps: true }
-);
+};
 
-module.exports = mongoose.model('Financial', financialSchema);
+module.exports = FinancialSchema;

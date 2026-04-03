@@ -1,18 +1,15 @@
 /**
- * Database Connection Tests
- * Tests for MongoDB connection configuration and error handling.
+ * Database Configuration Tests
+ *
+ * Verifies that the db.js stub (used during the Mongoose→Firestore migration)
+ * exports a callable no-op function and does not throw.
+ *
+ * Full Firestore integration tests will be added in task 3.
  */
 
-describe('Database Configuration', () => {
-  const originalEnv = process.env;
-
+describe('Database Configuration (migration stub)', () => {
   beforeEach(() => {
     jest.resetModules();
-    process.env = { ...originalEnv };
-  });
-
-  afterEach(() => {
-    process.env = originalEnv;
   });
 
   it('should export a connectDB function', () => {
@@ -20,18 +17,8 @@ describe('Database Configuration', () => {
     expect(typeof connectDB).toBe('function');
   });
 
-  it('should exit process if MONGODB_URI is not set', async () => {
-    delete process.env.MONGODB_URI;
-
-    const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => {
-      throw new Error('process.exit called');
-    });
-
+  it('should resolve without throwing', async () => {
     const connectDB = require('../../config/db');
-
-    await expect(connectDB()).rejects.toThrow('process.exit called');
-    expect(mockExit).toHaveBeenCalledWith(1);
-
-    mockExit.mockRestore();
+    await expect(connectDB()).resolves.toBeUndefined();
   });
 });

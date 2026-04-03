@@ -4,14 +4,14 @@
  * consistent JSON error responses.
  *
  * Must be registered LAST in the Express middleware stack.
+ *
+ * NOTE: Mongoose-specific error handling has been removed as part of the
+ * Firestore migration (task 1). Firestore errors will be handled in
+ * subsequent tasks.
  */
 
 const logger = require('../utils/logger');
-const {
-  AppError,
-  handleMongooseError,
-  handleJWTError,
-} = require('../utils/errors');
+const { AppError, handleJWTError } = require('../utils/errors');
 
 /**
  * Determine if we should expose error details to the client.
@@ -29,7 +29,7 @@ const shouldExposeDetails = (err) => {
 /**
  * Format error response body.
  *
- * @param {Error} err - The error
+ * @param {Error} err       - The error
  * @param {string} requestId - Request ID for tracing
  * @returns {Object} JSON response body
  */
@@ -58,7 +58,7 @@ const formatErrorResponse = (err, requestId) => {
 /**
  * Log the error with appropriate severity.
  *
- * @param {Error} err - The error
+ * @param {Error}  err - The error
  * @param {Object} req - Express request object
  */
 const logError = (err, req) => {
@@ -75,10 +75,8 @@ const logError = (err, req) => {
   };
 
   if (err.statusCode >= 500 || !err.isOperational) {
-    // Server errors and programming errors - log with stack trace
     logger.error('Unhandled error', { ...logData, stack: err.stack });
   } else if (err.statusCode >= 400) {
-    // Client errors - log as warnings (expected behavior)
     logger.warn('Client error', logData);
   }
 };
@@ -90,7 +88,10 @@ const logError = (err, req) => {
  * @returns {AppError|null}
  */
 const handleMulterError = (err) => {
-  const { PayloadTooLargeError, UnsupportedMediaTypeError, ValidationError } = require('../utils/errors');
+  const {
+    PayloadTooLargeError,
+    ValidationError,
+  } = require('../utils/errors');
 
   if (err.code === 'LIMIT_FILE_SIZE') {
     return new PayloadTooLargeError('File size exceeds the 5MB limit');
@@ -112,27 +113,22 @@ const handleMulterError = (err) => {
 
 /**
  * Global error handler middleware.
- * Must have 4 parameters (err, req, res, next) for Express to recognize it.
+ * Must have 4 parameters (err, req, res, next) for Express to recognise it.
  *
- * @param {Error} err - Error object
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
+ * @param {Error}    err  - Error object
+ * @param {Object}   req  - Express request object
+ * @param {Object}   res  - Express response object
  * @param {Function} next - Express next function
  */
 // eslint-disable-next-line no-unused-vars
 const globalErrorHandler = (err, req, res, next) => {
   let error = err;
 
-  // Convert known error types to AppError
   if (!(error instanceof AppError)) {
-    // Try Mongoose errors
-    const mongooseError = handleMongooseError(error);
-    if (mongooseError) {
-      error = mongooseError;
-    }
     // Try JWT errors
-    else if (handleJWTError(error)) {
-      error = handleJWTError(error);
+    const jwtError = handleJWTError(error);
+    if (jwtError) {
+      error = jwtError;
     }
     // Try Multer errors
     else if (error.name === 'MulterError') {
@@ -156,7 +152,7 @@ const globalErrorHandler = (err, req, res, next) => {
       const { PayloadTooLargeError } = require('../utils/errors');
       error = new PayloadTooLargeError('Request body too large');
     }
-    // Unknown errors - wrap as internal server error
+    // Unknown errors – wrap as internal server error
     else {
       const { InternalServerError } = require('../utils/errors');
       const internalError = new InternalServerError(
@@ -167,10 +163,8 @@ const globalErrorHandler = (err, req, res, next) => {
     }
   }
 
-  // Log the error
   logError(error, req);
 
-  // Send response
   const statusCode = error.statusCode || 500;
   const responseBody = formatErrorResponse(error, req.id);
 
@@ -182,8 +176,8 @@ const globalErrorHandler = (err, req, res, next) => {
  * Must be registered BEFORE the global error handler
  * but AFTER all routes.
  *
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
+ * @param {Object}   req  - Express request object
+ * @param {Object}   res  - Express response object
  * @param {Function} next - Express next function
  */
 const notFoundHandler = (req, res, next) => {

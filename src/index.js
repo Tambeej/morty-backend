@@ -8,7 +8,6 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 
-const connectDB = require('./config/db');
 const { apiLimiter } = require('./middleware/rateLimit');
 const logger = require('./utils/logger');
 
@@ -67,7 +66,9 @@ app.use((err, _req, res, _next) => {
 const PORT = process.env.PORT || 5000;
 
 const start = async () => {
-  await connectDB();
+  // NOTE: Database connection (Firestore) will be initialised in task 3.
+  // The MongoDB/Mongoose connection has been removed as part of the
+  // Firestore migration.
   app.listen(PORT, () => {
     logger.info(`Morty backend running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
   });
