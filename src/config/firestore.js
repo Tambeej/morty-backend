@@ -70,7 +70,11 @@ function getFirestore() {
 
   // Create Firestore instance + settings (only once)
   dbInstance = admin.firestore();
-  dbInstance.settings({ ignoreUndefinedProperties: true });
+  try {
+    dbInstance.settings({ ignoreUndefinedProperties: true });
+  } catch (_) {
+    // settings() may already have been called by another config module (e.g. firebase.js)
+  }
 
   return dbInstance;
 }
