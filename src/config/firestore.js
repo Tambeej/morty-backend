@@ -15,16 +15,15 @@
  * `getApps()` guard ensures the SDK is only initialised once.
  */
 /**
- * Firestore configuration module - Singleton pattern
+ * Firestore configuration - Strict singleton
  */
 const admin = require('firebase-admin');
 const logger = require('../utils/logger');
 
 let dbInstance = null;
-let isInitialized = false;
 
 /**
- * Build credential from env vars
+ * Build credential
  */
 function buildCredential() {
   if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
@@ -45,18 +44,16 @@ function buildCredential() {
     });
   }
 
-  throw new Error('Firestore credentials not configured. Check your environment variables.');
+  throw new Error('Firestore credentials not configured.');
 }
 
 /**
- * Initialize Firestore (truly idempotent)
+ * Get or create the Firestore instance (completely safe to call multiple times)
  */
-function initFirestore() {
-  if (dbInstance) {
-    return dbInstance;
-  }
+function getFirestore() {
+  if (dbInstance) return dbInstance;
 
-  // Initialize Firebase Admin only once
+  // Initialize Admin SDK only once
   if (admin.apps.length === 0) {
     const credential = buildCredential();
     const projectId = process.env.FIREBASE_PROJECT_ID ||
@@ -71,20 +68,14 @@ function initFirestore() {
     logger.info('Firebase Admin SDK initialised successfully');
   }
 
-  // Create the Firestore instance only once
+  // Create Firestore instance + settings (only once)
   dbInstance = admin.firestore();
-
-  // Apply settings ONLY on the first instance, before any use
   dbInstance.settings({ ignoreUndefinedProperties: true });
 
-  isInitialized = true;
   return dbInstance;
 }
 
-// Initialize once when this module is first required
-const db = initFirestore();
-
-// Export the singleton
-module.exports = db;
+// Export the getter (recommended) + backward compatibility
+module.exports = getFirestore();
+module.exports.getFirestore = getFirestore;
 module.exports.admin = admin;
-module.exports.initFirestore = initFirestore; // for manual re-init if ever needed
