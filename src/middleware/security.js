@@ -322,7 +322,7 @@ const SUSPICIOUS_PATTERNS = [
   /(<script|<iframe|javascript:|vbscript:)/i, // XSS
   /(union\s+select|drop\s+table|insert\s+into)/i, // SQL injection
   /(\$where|\$gt|\$lt|\$ne|\$in|\$nin|\$or|\$and)/i, // NoSQL injection
-  /(\.\.\/|\.\.\\/)/i, // Path traversal
+  /(\.\.\/|\.\.\\)/i, // Path traversal
   /(exec\s*\(|eval\s*\(|system\s*\()/i, // Code injection
 ];
 
