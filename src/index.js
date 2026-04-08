@@ -25,8 +25,31 @@ const app = express();
 app.use(helmet());
 app.use(
   cors({
-    origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+    origin: (origin, callback) => {
+      const allowedOrigins = [
+        'https://tambeej.github.io',           // GitHub Pages frontend
+        'http://localhost:3000',               // React default
+        'http://localhost:5173',               // Vite default
+        process.env.CORS_ORIGIN,               // fallback from env var
+      ].filter(Boolean); // remove undefined/null
+
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        console.warn(`CORS blocked origin: ${origin}`);
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'Accept'
+    ],
+    preflightContinue: false,
+    optionsSuccessStatus: 204
   })
 );
 app.use(apiLimiter);
