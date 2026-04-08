@@ -4,11 +4,10 @@
 require('dotenv').config();
 
 const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
 const morgan = require('morgan');
 
 const { apiLimiter } = require('./middleware/rateLimit');
+const { corsMiddleware, helmetMiddleware } = require('./middleware/security');
 const logger = require('./utils/logger');
 
 // Route imports
@@ -22,36 +21,8 @@ const dashboardRoutes = require('./routes/dashboard');
 const app = express();
 
 // Security & utility middleware (order matters)
-app.use(helmet());
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      const allowedOrigins = [
-        'https://tambeej.github.io',           // GitHub Pages frontend
-        'http://localhost:3000',               // React default
-        'http://localhost:5173',               // Vite default
-        process.env.CORS_ORIGIN,               // fallback from env var
-      ].filter(Boolean); // remove undefined/null
-
-      if (allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        console.warn(`CORS blocked origin: ${origin}`);
-        callback(new Error('Not allowed by CORS'));
-      }
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: [
-      'Content-Type',
-      'Authorization',
-      'X-Requested-With',
-      'Accept'
-    ],
-    preflightContinue: false,
-    optionsSuccessStatus: 204
-  })
-);
+app.use(helmetMiddleware);
+app.use(corsMiddleware);
 app.use(apiLimiter);
 app.use(morgan('combined', { stream: { write: (msg) => logger.info(msg.trim()) } }));
 app.use(express.json({ limit: '10mb' }));

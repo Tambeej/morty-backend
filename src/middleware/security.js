@@ -125,6 +125,8 @@ const helmetMiddleware = helmet({
   xssFilter: true,
   // Hide X-Powered-By header
   hidePoweredBy: true,
+  // Allow Google sign-in popup to communicate with the opener window
+  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
   // Referrer policy
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   // Permissions policy
