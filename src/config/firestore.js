@@ -14,26 +14,24 @@
  * The module is safe to require multiple times – firebase-admin's
  * `getApps()` guard ensures the SDK is only initialised once.
  */
-
+/**
+ * Firestore configuration module - Singleton pattern
+ */
 const admin = require('firebase-admin');
 const logger = require('../utils/logger');
 
-let firestoreSettingsApplied = false;
+let dbInstance = null;
+let isInitialized = false;
 
 /**
- * Build the firebase-admin credential from environment variables.
- *
- * @returns {admin.credential.Base} A firebase-admin credential object.
- * @throws {Error} When neither credential strategy is configured.
+ * Build credential from env vars
  */
 function buildCredential() {
-  // Strategy 1 – service account JSON file
   if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     logger.info('Firestore: using GOOGLE_APPLICATION_CREDENTIALS file');
     return admin.credential.applicationDefault();
   }
 
-  // Strategy 2 – individual env vars (CI / Render)
   const projectId = process.env.FIREBASE_PROJECT_ID;
   const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
   const privateKey = process.env.FIREBASE_PRIVATE_KEY;
@@ -43,31 +41,27 @@ function buildCredential() {
     return admin.credential.cert({
       projectId,
       clientEmail,
-      // Render / most CI systems store the key with literal \n sequences
       privateKey: privateKey.replace(/\\n/g, '\n'),
     });
   }
 
-  throw new Error(
-    'Firestore credentials not configured. ' +
-      'Set GOOGLE_APPLICATION_CREDENTIALS or ' +
-      'FIREBASE_PROJECT_ID + FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY.'
-  );
+  throw new Error('Firestore credentials not configured. Check your environment variables.');
 }
 
 /**
- * Initialise the Firebase Admin SDK (idempotent).
- *
- * @returns {admin.firestore.Firestore} The Firestore database instance.
+ * Initialize Firestore (truly idempotent)
  */
 function initFirestore() {
-  let db;
+  if (dbInstance) {
+    return dbInstance;
+  }
+
+  // Initialize Firebase Admin only once
   if (admin.apps.length === 0) {
     const credential = buildCredential();
-    const projectId =
-      process.env.FIREBASE_PROJECT_ID ||
-      process.env.GCLOUD_PROJECT ||
-      process.env.GOOGLE_CLOUD_PROJECT;
+    const projectId = process.env.FIREBASE_PROJECT_ID ||
+                      process.env.GCLOUD_PROJECT ||
+                      process.env.GOOGLE_CLOUD_PROJECT;
 
     admin.initializeApp({
       credential,
@@ -75,23 +69,22 @@ function initFirestore() {
     });
 
     logger.info('Firebase Admin SDK initialised successfully');
-
-    db = admin.firestore();
-  } else {
-    db = admin.firestore();
   }
 
-  if (!firestoreSettingsApplied) {
-    db.settings({ ignoreUndefinedProperties: true });
-    firestoreSettingsApplied = true;
-  }
+  // Create the Firestore instance only once
+  dbInstance = admin.firestore();
 
-  return db;
+  // Apply settings ONLY on the first instance, before any use
+  dbInstance.settings({ ignoreUndefinedProperties: true });
+
+  isInitialized = true;
+  return dbInstance;
 }
 
-/** Singleton Firestore instance shared across the application. */
+// Initialize once when this module is first required
 const db = initFirestore();
 
+// Export the singleton
 module.exports = db;
 module.exports.admin = admin;
-module.exports.initFirestore = initFirestore;
+module.exports.initFirestore = initFirestore; // for manual re-init if ever needed
