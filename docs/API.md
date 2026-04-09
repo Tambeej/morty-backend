@@ -1,6 +1,6 @@
 # Morty Backend — API Reference
 
-> **Base URL:** `https://morty-backend.onrender.com/api/v1`  
+> **Base URL:** `https://morty-backend-h9sb.onrender.com/api/v1`  
 > **Local dev:** `http://localhost:5000/api/v1`  
 > Configurable via the `VITE_API_URL` environment variable on the frontend.
 
@@ -1288,7 +1288,7 @@ export const mockDashboard = {
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `VITE_API_URL` | ✅ | Backend API base URL (e.g., `https://morty-backend.onrender.com/api/v1`) |
+| `VITE_API_URL` | ✅ | Backend API base URL (e.g., `https://morty-backend-h9sb.onrender.com/api/v1`) |
 | `VITE_FIREBASE_API_KEY` | ✅ | Firebase web app API key |
 | `VITE_FIREBASE_AUTH_DOMAIN` | ✅ | Firebase Auth domain (e.g., `myproject.firebaseapp.com`) |
 | `VITE_FIREBASE_PROJECT_ID` | ✅ | Firebase GCP project ID |
