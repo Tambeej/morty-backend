@@ -20,6 +20,10 @@ const dashboardRoutes = require('./routes/dashboard');
 // ── App setup ────────────────────────────────────────────────────────────────
 const app = express();
 
+// Trust the first proxy (Render's reverse proxy) so that req.ip,
+// rate-limiters, and other IP-dependent middleware work correctly.
+app.set('trust proxy', 1);
+
 // Security & utility middleware (order matters)
 app.use(helmetMiddleware);
 app.use(corsMiddleware);
