@@ -45,6 +45,20 @@
           "order": "DESCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "community_profiles",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "incomeBin",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "loanBin",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [
@@ -84,6 +98,36 @@
       "indexes": [
         {
           "order": "DESCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "community_profiles",
+      "fieldPath": "profileHash",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "community_profiles",
+      "fieldPath": "incomeBin",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "community_profiles",
+      "fieldPath": "consent",
+      "indexes": [
+        {
+          "order": "ASCENDING",
           "queryScope": "COLLECTION"
         }
       ]

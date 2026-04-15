@@ -101,6 +101,25 @@ const SENTINEL_DOCS = [
       _sentinel: true,
     },
   },
+  {
+    collection: COLLECTIONS.COMMUNITY_PROFILES,
+    id: '_sentinel',
+    data: {
+      profileHash: '__sentinel__',
+      incomeBin: 0,
+      loanBin: 0,
+      ltvBin: 0,
+      stabilityBin: 0,
+      bank: null,
+      branch: null,
+      rates: null,
+      weightedRate: null,
+      consent: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      _sentinel: true,
+    },
+  },
 ];
 
 // ─── Main ─────────────────────────────────────────────────────────────────────

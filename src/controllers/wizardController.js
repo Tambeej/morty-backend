@@ -11,7 +11,7 @@
  *   success: true,
  *   data: {
  *     portfolios: Portfolio[],
- *     communityTips: [],
+ *     communityTips: CommunityTip[],
  *     metadata: {
  *       generatedAt: ISO string,
  *       ratesSource: string,
@@ -21,11 +21,24 @@
  *     }
  *   }
  * }
+ *
+ * CommunityTip shape:
+ * {
+ *   type: 'winning_offer' | 'rate_comparison' | 'community_size',
+ *   priority: number,
+ *   bank?: string,
+ *   branch?: string,
+ *   messageHe: string,
+ *   messageEn: string,
+ *   ... (type-specific fields)
+ * }
  */
 
 'use strict';
 
 const wizardService = require('../services/wizardService');
+const communityService = require('../services/communityService');
+const ratesService = require('../services/ratesService');
 const { validateBusinessRules } = require('../validators/wizardValidator');
 const logger = require('../utils/logger');
 const { sendSuccess, sendError } = require('../utils/response');
@@ -35,6 +48,8 @@ const { sendSuccess, sendError } = require('../utils/response');
  *
  * Receives validated wizard inputs and generates up to 4 mortgage
  * portfolio scenarios using Bank of Israel rates and AI.
+ * Also queries the community intelligence engine for hyper-local
+ * bank/branch recommendations from similar anonymized profiles.
  *
  * This is a public endpoint (no authentication required).
  * Rate-limited to 5 requests per minute per IP.
@@ -65,8 +80,14 @@ exports.submitWizard = async (req, res) => {
       consent,
     });
 
-    // Generate portfolios
-    const result = await wizardService.generatePortfolios(inputs, consent);
+    // Run portfolio generation and community tips in parallel for speed
+    const [result, currentRates] = await Promise.all([
+      wizardService.generatePortfolios(inputs, consent),
+      ratesService.getCurrentAverages().catch((err) => {
+        logger.warn(`wizardController: failed to get rates for community tips: ${err.message}`);
+        return null;
+      }),
+    ]);
 
     if (!result || !result.portfolios || result.portfolios.length === 0) {
       return sendError(
@@ -77,10 +98,26 @@ exports.submitWizard = async (req, res) => {
       );
     }
 
+    // Get community intelligence tips (non-blocking – degrades gracefully)
+    let communityTips = [];
+    try {
+      communityTips = await communityService.getCommunityTips(inputs, currentRates);
+    } catch (err) {
+      logger.warn(`wizardController.submitWizard: community tips failed: ${err.message}`);
+      // Continue without community tips – not critical
+    }
+
+    // Store anonymous profile if user consented (fire-and-forget)
+    if (consent) {
+      communityService.storeAnonymousProfile(inputs).catch((err) => {
+        logger.warn(`wizardController.submitWizard: anonymous profile storage failed: ${err.message}`);
+      });
+    }
+
     // Build response per architecture contract
     const responseData = {
       portfolios: result.portfolios,
-      communityTips: [], // Populated by community service in a future task
+      communityTips,
       metadata: result.metadata,
     };
 
