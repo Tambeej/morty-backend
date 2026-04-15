@@ -5,14 +5,16 @@
  *   - User wizard inputs (6 steps)
  *   - Bank of Israel current average rates (from ratesService)
  *   - AI-powered optimization (OpenAI GPT-4o-mini)
+ *   - User profile analysis (LTV, affordability, risk tolerance)
  *
  * Portfolio Scenarios:
  *   1. "Market Standard" (30 years) – Always generated. Generic mix for lowest monthly repayment.
  *   2. "Fast Track" (20 years) – Always generated. Shorter term for massive interest savings.
  *   3. "Inflation-Proof" (conditional) – Non-indexed tracks only. Generated when CPI rates
- *      are high or user has moderate stability preference.
+ *      are high, user has moderate stability preference, expects future funds, or has high LTV.
  *   4. "Stability-First" (conditional) – Fixed-rate heavy. Generated when user's
- *      stabilityPreference >= 7.
+ *      stabilityPreference >= 7, or tight affordability with moderate stability preference,
+ *      or risk-averse profile without future funds.
  *
  * Each portfolio contains:
  *   - id, name (Hebrew + English), description
@@ -21,15 +23,19 @@
  *   - totalCost: principal + total interest over full term (₪)
  *   - totalInterest: total interest paid (₪)
  *   - termYears: loan duration
+ *   - fitnessScore: 0-100 score indicating how well the portfolio fits the user
+ *   - recommended: boolean flag for the best-fit portfolio
  *
  * The service first attempts AI-powered generation via OpenAI.
- * If OpenAI is unavailable, it falls back to deterministic rule-based generation.
+ * If OpenAI is unavailable, it falls back to deterministic rule-based generation
+ * using the portfolioEngine module.
  */
 
 'use strict';
 
 const OpenAI = require('openai');
 const ratesService = require('./ratesService');
+const portfolioEngine = require('./portfolioEngine');
 const logger = require('../utils/logger');
 
 let openai;
@@ -37,58 +43,29 @@ if (process.env.OPENAI_API_KEY) {
   openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-/** Portfolio scenario type identifiers */
-const SCENARIO_TYPES = Object.freeze({
-  MARKET_STANDARD: 'market_standard',
-  FAST_TRACK: 'fast_track',
-  INFLATION_PROOF: 'inflation_proof',
-  STABILITY_FIRST: 'stability_first',
-});
-
-/** Hebrew names for each scenario */
-const SCENARIO_NAMES_HE = Object.freeze({
-  [SCENARIO_TYPES.MARKET_STANDARD]: 'תיק שוק סטנדרטי',
-  [SCENARIO_TYPES.FAST_TRACK]: 'מסלול מהיר',
-  [SCENARIO_TYPES.INFLATION_PROOF]: 'חסין אינפלציה',
-  [SCENARIO_TYPES.STABILITY_FIRST]: 'יציבות קודם',
-});
-
-/** English names for each scenario */
-const SCENARIO_NAMES_EN = Object.freeze({
-  [SCENARIO_TYPES.MARKET_STANDARD]: 'Market Standard',
-  [SCENARIO_TYPES.FAST_TRACK]: 'Fast Track',
-  [SCENARIO_TYPES.INFLATION_PROOF]: 'Inflation-Proof',
-  [SCENARIO_TYPES.STABILITY_FIRST]: 'Stability-First',
-});
-
-/** Descriptions (Hebrew) */
-const SCENARIO_DESCRIPTIONS = Object.freeze({
-  [SCENARIO_TYPES.MARKET_STANDARD]: '30 שנה – תמהיל מאוזן להחזר חודשי נמוך',
-  [SCENARIO_TYPES.FAST_TRACK]: '20 שנה – חיסכון משמעותי בריבית',
-  [SCENARIO_TYPES.INFLATION_PROOF]: 'מסלולים לא צמודים בלבד – הגנה מפני עליית מדד',
-  [SCENARIO_TYPES.STABILITY_FIRST]: 'דגש על ריבית קבועה – החזר חודשי צפוי ויציב',
-});
-
-/** Track type labels (Hebrew) */
-const TRACK_LABELS_HE = Object.freeze({
-  fixed: 'קבועה לא צמודה (קל"צ)',
-  cpi: 'צמוד מדד',
-  prime: 'פריים',
-  variable: 'משתנה לא צמודה',
-});
-
-/** Stability preference threshold for Stability-First scenario */
-const STABILITY_THRESHOLD = 7;
-
-/** CPI rate threshold above which Inflation-Proof is recommended */
-const CPI_RATE_THRESHOLD = 2.5;
+// Re-export constants from portfolioEngine for backward compatibility
+const {
+  SCENARIO_TYPES,
+  SCENARIO_NAMES_HE,
+  SCENARIO_NAMES_EN,
+  SCENARIO_DESCRIPTIONS,
+  TRACK_LABELS_HE,
+  STABILITY_THRESHOLD,
+  CPI_RATE_THRESHOLD,
+} = portfolioEngine;
 
 // ── Main Entry Point ──────────────────────────────────────────────────────────
 
 /**
  * Generate up to 4 mortgage portfolio scenarios for the given wizard inputs.
+ *
+ * Flow:
+ *   1. Fetch current BOI rates
+ *   2. Analyse user profile (LTV, affordability, risk tolerance, future funds)
+ *   3. Determine which scenarios to generate (conditional logic)
+ *   4. Generate portfolios (AI-first, rule-based fallback)
+ *   5. Score and rank portfolios by fitness for user profile
+ *   6. Return portfolios with metadata
  *
  * @param {object} inputs - Validated wizard inputs
  * @param {number} inputs.propertyPrice - Property purchase price (₪)
@@ -114,90 +91,81 @@ async function generatePortfolios(inputs, consent) {
     rates = { fixed: 4.65, cpi: 3.15, prime: 6.05, variable: 4.95 };
   }
 
+  // 2. Analyse user profile
+  const profile = portfolioEngine.analyseUserProfile(inputs);
+
   logger.info('wizardService.generatePortfolios: generating portfolios', {
     loanAmount: inputs.loanAmount,
     stabilityPreference: inputs.stabilityPreference,
+    ltvClass: profile.ltvClass,
+    affordability: profile.affordability,
+    riskTolerance: profile.riskTolerance,
+    hasFutureFunds: profile.hasFutureFunds,
     rates,
   });
 
-  // 2. Determine which scenarios to generate
-  const scenarioTypes = determineScenarios(inputs, rates);
+  // 3. Determine which scenarios to generate (conditional logic)
+  const { scenarios: scenarioTypes, reasons } = portfolioEngine.determineScenarios(
+    inputs,
+    rates,
+    profile
+  );
 
-  // 3. Try AI-powered generation first, fall back to rule-based
+  logger.info('wizardService.generatePortfolios: scenarios determined', {
+    scenarioTypes,
+    reasons,
+  });
+
+  // 4. Try AI-powered generation first, fall back to rule-based
   let portfolios;
+  let generationMethod = 'rule_based';
   try {
-    portfolios = await generateWithAI(inputs, rates, scenarioTypes);
+    portfolios = await generateWithAI(inputs, rates, scenarioTypes, profile);
+    generationMethod = 'ai';
     logger.info('wizardService.generatePortfolios: AI generation succeeded');
   } catch (err) {
     logger.warn(`wizardService.generatePortfolios: AI generation failed, using rule-based: ${err.message}`);
-    portfolios = generateRuleBased(inputs, rates, scenarioTypes);
+    portfolios = generateRuleBased(inputs, rates, scenarioTypes, profile);
   }
 
-  const elapsed = Date.now() - startTime;
-  logger.info(`wizardService.generatePortfolios: completed in ${elapsed}ms, ${portfolios.length} portfolios`);
+  // 5. Score and rank portfolios
+  const scoredPortfolios = portfolioEngine.scorePortfolios(portfolios, inputs, profile);
 
-  // 4. Build metadata
+  const elapsed = Date.now() - startTime;
+  logger.info(`wizardService.generatePortfolios: completed in ${elapsed}ms, ${scoredPortfolios.length} portfolios`);
+
+  // 6. Build metadata
   const metadata = {
     generatedAt: new Date().toISOString(),
     ratesSource: rates ? 'bank_of_israel' : 'fallback',
-    generationMethod: portfolios[0]?._generationMethod || 'rule_based',
+    generationMethod,
     processingTimeMs: elapsed,
+    scenariosGenerated: scenarioTypes,
+    scenarioReasons: reasons,
     inputSummary: {
       propertyPrice: inputs.propertyPrice,
       loanAmount: inputs.loanAmount,
-      ltv: Math.round((inputs.loanAmount / inputs.propertyPrice) * 100),
+      ltv: Math.round(profile.ltv),
+      ltvClass: profile.ltvClass,
       stabilityPreference: inputs.stabilityPreference,
-      totalIncome: inputs.monthlyIncome + (inputs.additionalIncome || 0),
+      totalIncome: profile.totalIncome,
       targetRepayment: inputs.targetRepayment,
+      repaymentRatio: profile.repaymentRatio,
+      affordability: profile.affordability,
+      riskTolerance: profile.riskTolerance,
+      hasFutureFunds: profile.hasFutureFunds,
+      futureFundsTimeframe: inputs.futureFunds.timeframe,
     },
     consent,
   };
 
   // Strip internal fields from portfolios
-  const cleanPortfolios = portfolios.map((p) => {
-    const { _generationMethod, ...clean } = p;
+  const cleanPortfolios = scoredPortfolios.map((p) => {
+    const { _generationMethod, scoreBreakdown, ...clean } = p;
     return clean;
   });
 
   return { portfolios: cleanPortfolios, metadata };
-}
-
-// ── Scenario Selection ────────────────────────────────────────────────────────
-
-/**
- * Determine which portfolio scenarios to generate based on user inputs and rates.
- *
- * Always includes: Market Standard, Fast Track
- * Conditionally includes:
- *   - Inflation-Proof: when CPI rate is above threshold OR stability pref is moderate (4-7)
- *   - Stability-First: when stability preference >= 7
- *
- * @param {object} inputs - Wizard inputs
- * @param {object} rates - Current BOI average rates
- * @returns {string[]} Array of scenario type identifiers
- */
-function determineScenarios(inputs, rates) {
-  const scenarios = [
-    SCENARIO_TYPES.MARKET_STANDARD,
-    SCENARIO_TYPES.FAST_TRACK,
-  ];
-
-  // Inflation-Proof: recommended when CPI rates are high or user has moderate stability preference
-  const cpiRate = rates.cpi || 3.15;
-  const shouldAddInflationProof =
-    cpiRate >= CPI_RATE_THRESHOLD ||
-    (inputs.stabilityPreference >= 4 && inputs.stabilityPreference <= 8);
-
-  if (shouldAddInflationProof) {
-    scenarios.push(SCENARIO_TYPES.INFLATION_PROOF);
-  }
-
-  // Stability-First: recommended when user prefers high stability
-  if (inputs.stabilityPreference >= STABILITY_THRESHOLD) {
-    scenarios.push(SCENARIO_TYPES.STABILITY_FIRST);
-  }
-
-  return scenarios;
 }
 
 // ── AI-Powered Generation ─────────────────────────────────────────────────────
@@ -205,22 +173,23 @@ function determineScenarios(inputs, rates) {
 /**
  * Generate portfolios using OpenAI GPT-4o-mini.
  *
- * The AI is given the user's inputs, current BOI rates, and instructions
- * to produce specific portfolio scenarios with track breakdowns.
+ * The AI is given the user's inputs, current BOI rates, profile analysis,
+ * and instructions to produce specific portfolio scenarios with track breakdowns.
  *
  * @param {object} inputs - Wizard inputs
  * @param {object} rates - Current BOI average rates
  * @param {string[]} scenarioTypes - Which scenarios to generate
+ * @param {object} profile - User profile analysis
  * @returns {Promise<Array<object>>} Generated portfolios
  */
-async function generateWithAI(inputs, rates, scenarioTypes) {
+async function generateWithAI(inputs, rates, scenarioTypes, profile) {
   if (!openai) {
     throw new Error('OpenAI client not initialized (OPENAI_API_KEY not set)');
   }
 
-  const totalIncome = inputs.monthlyIncome + (inputs.additionalIncome || 0);
-  const ltv = Math.round((inputs.loanAmount / inputs.propertyPrice) * 100);
-  const equity = inputs.propertyPrice - inputs.loanAmount;
+  const totalIncome = profile.totalIncome;
+  const ltv = profile.ltv;
+  const equity = profile.equity;
 
   const scenarioDescriptions = scenarioTypes.map((type) => {
     switch (type) {
@@ -237,16 +206,40 @@ async function generateWithAI(inputs, rates, scenarioTypes) {
     }
   }).filter(Boolean);
 
+  // Build future funds context
+  let futureFundsContext;
+  if (inputs.futureFunds.timeframe === 'none') {
+    futureFundsContext = 'None expected';
+  } else {
+    const amount = inputs.futureFunds.amount || 0;
+    const timeframe = inputs.futureFunds.timeframe.replace(/_/g, ' ');
+    futureFundsContext = `₪${amount.toLocaleString()} expected ${timeframe}`;
+    if (profile.canPrepayEarly) {
+      futureFundsContext += ' (near-term – consider prepayable tracks like prime)';
+    }
+  }
+
+  // Build profile context for AI
+  const profileContext = [
+    `Risk Tolerance: ${profile.riskTolerance} (stability pref ${inputs.stabilityPreference}/10)`,
+    `Affordability: ${profile.affordability} (repayment is ${(profile.repaymentRatio * 100).toFixed(1)}% of income)`,
+    `LTV: ${ltv.toFixed(1)}% (${profile.ltvClass})`,
+    profile.hasFutureFunds ? 'Has future funds – consider prepayable tracks' : 'No future funds expected',
+  ].join('\n');
+
   const prompt = `You are an Israeli mortgage portfolio advisor. Generate ${scenarioTypes.length} distinct mortgage portfolio scenarios based on the following user profile and current Bank of Israel rates.
 
 User Profile:
 - Property Price: ₪${inputs.propertyPrice.toLocaleString()}
 - Loan Amount: ₪${inputs.loanAmount.toLocaleString()}
-- Equity: ₪${equity.toLocaleString()} (LTV: ${ltv}%)
+- Equity: ₪${equity.toLocaleString()} (LTV: ${ltv.toFixed(1)}%)
 - Monthly Income: ₪${totalIncome.toLocaleString()}
 - Target Monthly Repayment: ₪${inputs.targetRepayment.toLocaleString()}
-- Future Funds: ${inputs.futureFunds.timeframe === 'none' ? 'None expected' : `₪${(inputs.futureFunds.amount || 0).toLocaleString()} expected ${inputs.futureFunds.timeframe.replace(/_/g, ' ')}`}
-- Stability Preference: ${inputs.stabilityPreference}/10 (${inputs.stabilityPreference >= 7 ? 'high stability' : inputs.stabilityPreference >= 4 ? 'moderate' : 'flexible/risk-tolerant'})
+- Future Funds: ${futureFundsContext}
+- Stability Preference: ${inputs.stabilityPreference}/10
+
+Profile Analysis:
+${profileContext}
 
 Current Bank of Israel Average Rates:
 - Fixed (קל"צ): ${rates.fixed}%
@@ -264,11 +257,14 @@ For each portfolio, provide:
 - Calculate total cost (principal + total interest)
 - Calculate total interest paid
 
-IMPORTANT:
+IMPORTANT RULES:
 - All percentages in a portfolio must sum to exactly 100%
 - Use realistic rates close to the BOI averages (banks add 0-0.5% spread)
 - Monthly repayment calculation should use standard PMT formula
 - For prime tracks, express rate as "P-X%" or "P+X%" relative to prime rate
+- Adapt allocations to the user's profile: ${profile.riskTolerance} risk tolerance, ${profile.affordability} affordability
+- For Inflation-Proof: ONLY use fixed, prime, and variable tracks (NO cpi tracks)
+- For Stability-First: At least 60% must be fixed-rate tracks
 
 Respond ONLY with valid JSON in this exact format (no markdown, no explanation):
 {
@@ -293,11 +289,11 @@ Respond ONLY with valid JSON in this exact format (no markdown, no explanation):
     messages: [
       {
         role: 'system',
-        content: 'You are an expert Israeli mortgage advisor. You respond only with valid JSON. All calculations must be mathematically accurate using standard amortization formulas.',
+        content: 'You are an expert Israeli mortgage advisor. You respond only with valid JSON. All calculations must be mathematically accurate using standard amortization formulas. Adapt your recommendations to the user\'s risk profile and financial situation.',
       },
       { role: 'user', content: prompt },
     ],
-    max_tokens: 2000,
+    max_tokens: 2500,
     temperature: 0.3,
     response_format: { type: 'json_object' },
   });
@@ -312,10 +308,11 @@ Respond ONLY with valid JSON in this exact format (no markdown, no explanation):
   // Validate and enrich AI-generated portfolios
   const enriched = parsed.portfolios.map((aiPortfolio, index) => {
     const scenarioType = scenarioTypes[index] || SCENARIO_TYPES.MARKET_STANDARD;
-    return enrichPortfolio(aiPortfolio, scenarioType, inputs, rates);
+    return portfolioEngine.enrichPortfolio(aiPortfolio, scenarioType, inputs, rates);
   });
 
-  return enriched;
+  // Validate portfolio constraints
+  return enriched.map((portfolio) => validatePortfolioConstraints(portfolio));
 }
 
 // ── Rule-Based Generation (Fallback) ──────────────────────────────────────────
@@ -323,285 +320,90 @@ Respond ONLY with valid JSON in this exact format (no markdown, no explanation):
 /**
  * Generate portfolios using deterministic rules when AI is unavailable.
  *
- * Uses standard amortization formulas and predefined track allocations
- * based on the scenario type and user preferences.
+ * Uses the portfolioEngine's adaptive allocation system which adjusts
+ * track percentages based on user profile analysis.
  *
  * @param {object} inputs - Wizard inputs
  * @param {object} rates - Current BOI average rates
  * @param {string[]} scenarioTypes - Which scenarios to generate
+ * @param {object} profile - User profile analysis
  * @returns {Array<object>} Generated portfolios
  */
-function generateRuleBased(inputs, rates, scenarioTypes) {
+function generateRuleBased(inputs, rates, scenarioTypes, profile) {
   return scenarioTypes.map((type) => {
-    const config = getRuleBasedConfig(type, inputs, rates);
-    const portfolio = buildPortfolio(config, type, inputs, rates);
-    portfolio._generationMethod = 'rule_based';
+    const config = portfolioEngine.getAdaptiveAllocation(type, inputs, rates, profile);
+    const portfolio = portfolioEngine.buildPortfolio(config, type, inputs, rates, 'rule_based');
     return portfolio;
   });
 }
 
+// ── Portfolio Validation ──────────────────────────────────────────────────────
+
 /**
- * Get the rule-based track allocation configuration for a scenario type.
+ * Validate that a portfolio meets its scenario-specific constraints.
+ * Fixes minor issues (e.g., percentages not summing to 100) and logs warnings.
  *
- * @param {string} type - Scenario type identifier
- * @param {object} inputs - Wizard inputs
- * @param {object} rates - Current BOI average rates
- * @returns {object} Configuration with tracks and termYears
+ * @param {object} portfolio - Portfolio to validate
+ * @returns {object} Validated (and possibly corrected) portfolio
  */
-function getRuleBasedConfig(type, inputs, rates) {
-  const fixedRate = rates.fixed || 4.65;
-  const cpiRate = rates.cpi || 3.15;
-  const primeRate = rates.prime || 6.05;
-  const variableRate = rates.variable || 4.95;
+function validatePortfolioConstraints(portfolio) {
+  const tracks = portfolio.tracks || [];
 
-  switch (type) {
-    case SCENARIO_TYPES.MARKET_STANDARD:
-      return {
-        termYears: 30,
-        tracks: [
-          { type: 'fixed', percentage: 34, rate: fixedRate + 0.1, rateDisplay: `${(fixedRate + 0.1).toFixed(2)}%` },
-          { type: 'prime', percentage: 33, rate: primeRate - 0.15, rateDisplay: 'P-0.15%' },
-          { type: 'cpi', percentage: 33, rate: cpiRate + 0.05, rateDisplay: `${(cpiRate + 0.05).toFixed(2)}% + מדד` },
-        ],
-      };
-
-    case SCENARIO_TYPES.FAST_TRACK:
-      return {
-        termYears: 20,
-        tracks: [
-          { type: 'prime', percentage: 40, rate: primeRate - 0.2, rateDisplay: 'P-0.2%' },
-          { type: 'fixed', percentage: 30, rate: fixedRate + 0.05, rateDisplay: `${(fixedRate + 0.05).toFixed(2)}%` },
-          { type: 'variable', percentage: 30, rate: variableRate, rateDisplay: `${variableRate.toFixed(2)}%` },
-        ],
-      };
-
-    case SCENARIO_TYPES.INFLATION_PROOF:
-      // Strictly non-indexed tracks only (no CPI)
-      return {
-        termYears: inputs.stabilityPreference >= 5 ? 25 : 30,
-        tracks: [
-          { type: 'fixed', percentage: 40, rate: fixedRate + 0.15, rateDisplay: `${(fixedRate + 0.15).toFixed(2)}%` },
-          { type: 'prime', percentage: 35, rate: primeRate - 0.1, rateDisplay: 'P-0.1%' },
-          { type: 'variable', percentage: 25, rate: variableRate + 0.05, rateDisplay: `${(variableRate + 0.05).toFixed(2)}%` },
-        ],
-      };
-
-    case SCENARIO_TYPES.STABILITY_FIRST:
-      // Heavy fixed-rate allocation (>= 60%)
-      return {
-        termYears: 25,
-        tracks: [
-          { type: 'fixed', percentage: 60, rate: fixedRate + 0.2, rateDisplay: `${(fixedRate + 0.2).toFixed(2)}%` },
-          { type: 'cpi', percentage: 25, rate: cpiRate + 0.1, rateDisplay: `${(cpiRate + 0.1).toFixed(2)}% + מדד` },
-          { type: 'prime', percentage: 15, rate: primeRate - 0.1, rateDisplay: 'P-0.1%' },
-        ],
-      };
-
-    default:
-      logger.warn(`wizardService.getRuleBasedConfig: unknown scenario type '${type}'`);
-      return {
-        termYears: 30,
-        tracks: [
-          { type: 'fixed', percentage: 34, rate: fixedRate, rateDisplay: `${fixedRate.toFixed(2)}%` },
-          { type: 'prime', percentage: 33, rate: primeRate, rateDisplay: `${primeRate.toFixed(2)}%` },
-          { type: 'cpi', percentage: 33, rate: cpiRate, rateDisplay: `${cpiRate.toFixed(2)}% + מדד` },
-        ],
-      };
+  // Check percentages sum to 100
+  const totalPct = tracks.reduce((sum, t) => sum + t.percentage, 0);
+  if (totalPct !== 100 && tracks.length > 0) {
+    logger.warn(`wizardService.validatePortfolioConstraints: ${portfolio.type} tracks sum to ${totalPct}%, adjusting`);
+    // Adjust the last track to make it sum to 100
+    const diff = 100 - totalPct;
+    tracks[tracks.length - 1].percentage += diff;
   }
-}
 
-// ── Portfolio Building ────────────────────────────────────────────────────────
+  // Inflation-Proof: must not contain CPI tracks
+  if (portfolio.type === SCENARIO_TYPES.INFLATION_PROOF) {
+    const hasCpi = tracks.some((t) => t.type === 'cpi');
+    if (hasCpi) {
+      logger.warn('wizardService.validatePortfolioConstraints: Inflation-Proof contains CPI track, removing');
+      // Redistribute CPI allocation to fixed and prime
+      const cpiTracks = tracks.filter((t) => t.type === 'cpi');
+      const cpiPct = cpiTracks.reduce((sum, t) => sum + t.percentage, 0);
+      const nonCpiTracks = tracks.filter((t) => t.type !== 'cpi');
 
-/**
- * Build a complete portfolio object from a track configuration.
- *
- * Calculates monthly repayment, total cost, and total interest
- * using standard amortization (PMT) formula for each track,
- * then aggregates across all tracks.
- *
- * @param {object} config - Track configuration { termYears, tracks }
- * @param {string} scenarioType - Scenario type identifier
- * @param {object} inputs - Wizard inputs
- * @param {object} rates - Current BOI average rates
- * @returns {object} Complete portfolio object
- */
-function buildPortfolio(config, scenarioType, inputs, rates) {
-  const { termYears, tracks } = config;
-  const loanAmount = inputs.loanAmount;
-  const totalMonths = termYears * 12;
+      if (nonCpiTracks.length > 0) {
+        const addPerTrack = Math.floor(cpiPct / nonCpiTracks.length);
+        nonCpiTracks.forEach((t) => { t.percentage += addPerTrack; });
+        // Handle remainder
+        const remainder = cpiPct - (addPerTrack * nonCpiTracks.length);
+        nonCpiTracks[0].percentage += remainder;
+        portfolio.tracks = nonCpiTracks;
+      }
+    }
+  }
 
-  let totalMonthlyRepayment = 0;
-  let totalCost = 0;
+  // Stability-First: must have >= 60% fixed
+  if (portfolio.type === SCENARIO_TYPES.STABILITY_FIRST) {
+    const fixedPct = tracks
+      .filter((t) => t.type === 'fixed')
+      .reduce((sum, t) => sum + t.percentage, 0);
+    if (fixedPct < 60) {
+      logger.warn(`wizardService.validatePortfolioConstraints: Stability-First has only ${fixedPct}% fixed, adjusting`);
+      // Increase fixed allocation by taking from the largest non-fixed track
+      const deficit = 60 - fixedPct;
+      const nonFixedTracks = tracks.filter((t) => t.type !== 'fixed');
+      nonFixedTracks.sort((a, b) => b.percentage - a.percentage);
 
-  const enrichedTracks = tracks.map((track) => {
-    const trackAmount = loanAmount * (track.percentage / 100);
-    const monthlyRate = track.rate / 100 / 12;
-    const monthlyPayment = calculatePMT(trackAmount, monthlyRate, totalMonths);
-    const trackTotalCost = monthlyPayment * totalMonths;
-    const trackInterest = trackTotalCost - trackAmount;
+      if (nonFixedTracks.length > 0) {
+        const takeFrom = nonFixedTracks[0];
+        const canTake = Math.min(deficit, takeFrom.percentage - 5); // Keep at least 5%
+        takeFrom.percentage -= canTake;
+        const fixedTrack = tracks.find((t) => t.type === 'fixed');
+        if (fixedTrack) {
+          fixedTrack.percentage += canTake;
+        }
+      }
+    }
+  }
 
-    totalMonthlyRepayment += monthlyPayment;
-    totalCost += trackTotalCost;
-
-    return {
-      name: TRACK_LABELS_HE[track.type] || track.type,
-      nameEn: track.type,
-      type: track.type,
-      percentage: track.percentage,
-      rate: track.rate,
-      rateDisplay: track.rateDisplay || `${track.rate.toFixed(2)}%`,
-      amount: Math.round(trackAmount),
-      monthlyPayment: Math.round(monthlyPayment),
-      totalCost: Math.round(trackTotalCost),
-      totalInterest: Math.round(trackInterest),
-    };
-  });
-
-  totalMonthlyRepayment = Math.round(totalMonthlyRepayment);
-  totalCost = Math.round(totalCost);
-  const totalInterest = totalCost - loanAmount;
-
-  // Calculate interest savings compared to Market Standard 30-year baseline
-  // (only meaningful for non-Market-Standard scenarios)
-  const baselineMonthly = calculateBaselineMonthlyPayment(loanAmount, rates, 30);
-  const baselineTotalCost = Math.round(baselineMonthly * 30 * 12);
-  const interestSavings = scenarioType !== SCENARIO_TYPES.MARKET_STANDARD
-    ? Math.max(0, baselineTotalCost - totalCost)
-    : 0;
-
-  return {
-    id: scenarioType,
-    type: scenarioType,
-    name: SCENARIO_NAMES_EN[scenarioType] || scenarioType,
-    nameHe: SCENARIO_NAMES_HE[scenarioType] || scenarioType,
-    description: SCENARIO_DESCRIPTIONS[scenarioType] || '',
-    termYears,
-    tracks: enrichedTracks,
-    monthlyRepayment: totalMonthlyRepayment,
-    totalCost,
-    totalInterest: Math.max(0, totalInterest),
-    interestSavings,
-    recommended: scenarioType === SCENARIO_TYPES.MARKET_STANDARD,
-    _generationMethod: 'rule_based',
-  };
-}
-
-/**
- * Enrich an AI-generated portfolio with standard fields and recalculated values.
- *
- * @param {object} aiPortfolio - Raw AI-generated portfolio
- * @param {string} scenarioType - Scenario type identifier
- * @param {object} inputs - Wizard inputs
- * @param {object} rates - Current BOI average rates
- * @returns {object} Enriched portfolio
- */
-function enrichPortfolio(aiPortfolio, scenarioType, inputs, rates) {
-  const termYears = aiPortfolio.termYears || 30;
-  const loanAmount = inputs.loanAmount;
-  const totalMonths = termYears * 12;
-
-  // Recalculate financials from AI-provided tracks for accuracy
-  let totalMonthlyRepayment = 0;
-  let totalCost = 0;
-
-  const enrichedTracks = (aiPortfolio.tracks || []).map((track) => {
-    const trackAmount = loanAmount * (track.percentage / 100);
-    const monthlyRate = track.rate / 100 / 12;
-    const monthlyPayment = calculatePMT(trackAmount, monthlyRate, totalMonths);
-    const trackTotalCost = monthlyPayment * totalMonths;
-    const trackInterest = trackTotalCost - trackAmount;
-
-    totalMonthlyRepayment += monthlyPayment;
-    totalCost += trackTotalCost;
-
-    return {
-      name: TRACK_LABELS_HE[track.type] || track.type,
-      nameEn: track.type,
-      type: track.type,
-      percentage: track.percentage,
-      rate: track.rate,
-      rateDisplay: track.rateDisplay || `${track.rate.toFixed(2)}%`,
-      amount: Math.round(trackAmount),
-      monthlyPayment: Math.round(monthlyPayment),
-      totalCost: Math.round(trackTotalCost),
-      totalInterest: Math.round(trackInterest),
-    };
-  });
-
-  totalMonthlyRepayment = Math.round(totalMonthlyRepayment);
-  totalCost = Math.round(totalCost);
-  const totalInterest = totalCost - loanAmount;
-
-  const baselineMonthly = calculateBaselineMonthlyPayment(loanAmount, rates, 30);
-  const baselineTotalCost = Math.round(baselineMonthly * 30 * 12);
-  const interestSavings = scenarioType !== SCENARIO_TYPES.MARKET_STANDARD
-    ? Math.max(0, baselineTotalCost - totalCost)
-    : 0;
-
-  return {
-    id: scenarioType,
-    type: scenarioType,
-    name: SCENARIO_NAMES_EN[scenarioType] || scenarioType,
-    nameHe: SCENARIO_NAMES_HE[scenarioType] || scenarioType,
-    description: SCENARIO_DESCRIPTIONS[scenarioType] || '',
-    termYears,
-    tracks: enrichedTracks,
-    monthlyRepayment: totalMonthlyRepayment,
-    totalCost,
-    totalInterest: Math.max(0, totalInterest),
-    interestSavings,
-    recommended: scenarioType === SCENARIO_TYPES.MARKET_STANDARD,
-    _generationMethod: 'ai',
-  };
-}
-
-// ── Financial Calculations ────────────────────────────────────────────────────
-
-/**
- * Calculate monthly payment using the standard PMT (amortization) formula.
- *
- * PMT = P * [r(1+r)^n] / [(1+r)^n - 1]
- *
- * Where:
- *   P = principal (loan amount for this track)
- *   r = monthly interest rate (annual rate / 12)
- *   n = total number of monthly payments
- *
- * @param {number} principal - Loan principal amount
- * @param {number} monthlyRate - Monthly interest rate (decimal, e.g., 0.004 for 4.8% annual)
- * @param {number} totalMonths - Total number of monthly payments
- * @returns {number} Monthly payment amount
- */
-function calculatePMT(principal, monthlyRate, totalMonths) {
-  if (principal <= 0) return 0;
-  if (monthlyRate <= 0) return principal / totalMonths;
-  if (totalMonths <= 0) return 0;
-
-  const factor = Math.pow(1 + monthlyRate, totalMonths);
-  return principal * (monthlyRate * factor) / (factor - 1);
-}
-
-/**
- * Calculate a baseline monthly payment for a standard 30-year mixed portfolio.
- * Used to compute interest savings for alternative scenarios.
- *
- * @param {number} loanAmount - Total loan amount
- * @param {object} rates - Current BOI average rates
- * @param {number} termYears - Loan term in years
- * @returns {number} Baseline monthly payment
- */
-function calculateBaselineMonthlyPayment(loanAmount, rates, termYears) {
-  const totalMonths = termYears * 12;
-  const fixedRate = (rates.fixed || 4.65) / 100 / 12;
-  const primeRate = (rates.prime || 6.05) / 100 / 12;
-  const cpiRate = (rates.cpi || 3.15) / 100 / 12;
-
-  // Standard 34/33/33 split
-  const fixedPayment = calculatePMT(loanAmount * 0.34, fixedRate, totalMonths);
-  const primePayment = calculatePMT(loanAmount * 0.33, primeRate, totalMonths);
-  const cpiPayment = calculatePMT(loanAmount * 0.33, cpiRate, totalMonths);
-
-  return fixedPayment + primePayment + cpiPayment;
+  return portfolio;
 }
 
 // ── Exports ───────────────────────────────────────────────────────────────────
@@ -611,16 +413,25 @@ module.exports = {
   generatePortfolios,
 
   // Internal helpers (exported for testing)
-  determineScenarios,
   generateWithAI,
   generateRuleBased,
-  getRuleBasedConfig,
-  buildPortfolio,
-  enrichPortfolio,
-  calculatePMT,
-  calculateBaselineMonthlyPayment,
+  validatePortfolioConstraints,
 
-  // Constants (exported for testing and other services)
+  // Re-exported from portfolioEngine for backward compatibility
+  determineScenarios: (inputs, rates) => {
+    const profile = portfolioEngine.analyseUserProfile(inputs);
+    return portfolioEngine.determineScenarios(inputs, rates, profile).scenarios;
+  },
+  getRuleBasedConfig: (type, inputs, rates) => {
+    const profile = portfolioEngine.analyseUserProfile(inputs);
+    return portfolioEngine.getAdaptiveAllocation(type, inputs, rates, profile);
+  },
+  buildPortfolio: portfolioEngine.buildPortfolio,
+  enrichPortfolio: portfolioEngine.enrichPortfolio,
+  calculatePMT: portfolioEngine.calculatePMT,
+  calculateBaselineMonthlyPayment: portfolioEngine.calculateBaselineMonthlyPayment,
+
+  // Constants (re-exported for backward compatibility)
   SCENARIO_TYPES,
   SCENARIO_NAMES_HE,
   SCENARIO_NAMES_EN,
