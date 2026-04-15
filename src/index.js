@@ -16,6 +16,10 @@ const profileRoutes = require('./routes/profile');
 const offersRoutes = require('./routes/offers');
 const analysisRoutes = require('./routes/analysis');
 const dashboardRoutes = require('./routes/dashboard');
+const ratesRoutes = require('./routes/rates');
+
+// Cron jobs
+const { startRatesCron } = require('./cron/ratesCron');
 
 // ── App setup ────────────────────────────────────────────────────────────────
 const app = express();
@@ -38,6 +42,9 @@ app.use('/api/v1/profile', profileRoutes);
 app.use('/api/v1/offers', offersRoutes);
 app.use('/api/v1/analysis', analysisRoutes);
 app.use('/api/v1/dashboard', dashboardRoutes);
+
+// Public routes (no auth required)
+app.use('/api/v1/public/rates', ratesRoutes);
 
 // Health check
 app.get('/health', (_req, res) => res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() }));
@@ -77,6 +84,10 @@ const start = async () => {
 
     // Attach db to app locals so controllers can access it if needed
     app.locals.db = db;
+
+    // Start cron jobs
+    startRatesCron();
+    logger.info('Cron jobs initialised');
   } catch (err) {
     logger.error(`Failed to initialise Firestore: ${err.message}`);
     // In production, exit so the process manager can restart with correct creds

@@ -10,26 +10,29 @@
  *
  * Collections
  * ───────────
- *  users      – one document per registered user (doc ID == user UID)
- *  financials – one document per user (doc ID == userId)
- *  offers     – many documents per user (auto-generated doc IDs)
+ *  users           – one document per registered user (doc ID == user UID)
+ *  financials      – one document per user (doc ID == userId)
+ *  offers          – many documents per user (auto-generated doc IDs)
+ *  mortgage_rates  – BOI average mortgage rates (doc ID == date or 'latest')
  *
  * Indexes
  * ───────
- *  users:      email (single-field, ascending) – for login lookup
- *  financials: userId (single-field, ascending) – for profile fetch
- *  offers:     (userId ASC, createdAt DESC) – composite, for list queries
+ *  users:          email (single-field, ascending) – for login lookup
+ *  financials:     userId (single-field, ascending) – for profile fetch
+ *  offers:         (userId ASC, createdAt DESC) – composite, for list queries
+ *  mortgage_rates: (date DESC) – for historical queries
  */
 
 'use strict';
 
 // ─── Collection Names ────────────────────────────────────────────────────────
 
-/** @type {Readonly<{USERS: string, FINANCIALS: string, OFFERS: string}>} */
+/** @type {Readonly<{USERS: string, FINANCIALS: string, OFFERS: string, MORTGAGE_RATES: string}>} */
 const COLLECTIONS = Object.freeze({
   USERS: 'users',
   FINANCIALS: 'financials',
   OFFERS: 'offers',
+  MORTGAGE_RATES: 'mortgage_rates',
 });
 
 // ─── Offer Status Enum ───────────────────────────────────────────────────────
@@ -39,6 +42,14 @@ const OFFER_STATUS = Object.freeze({
   PENDING: 'pending',
   ANALYZED: 'analyzed',
   ERROR: 'error',
+});
+
+// ─── Rates Source Enum ───────────────────────────────────────────────────────
+
+/** @type {Readonly<{BOI: string, FALLBACK: string}>} */
+const RATES_SOURCE = Object.freeze({
+  BOI: 'bank_of_israel',
+  FALLBACK: 'fallback',
 });
 
 // ─── Document Factories ──────────────────────────────────────────────────────
@@ -190,6 +201,53 @@ function createOfferDocument({
   };
 }
 
+/**
+ * Build a new `mortgage_rates` document.
+ *
+ * @param {object} params
+ * @param {string} params.date                - ISO date string of the fetch
+ * @param {object} params.fetchPeriod         - Period covered
+ * @param {string} params.fetchPeriod.start   - Start period (YYYY-MM)
+ * @param {string} params.fetchPeriod.end     - End period (YYYY-MM)
+ * @param {object} params.tracks              - Track data by type
+ * @param {object} params.averages            - Flat averages { fixed, cpi, prime, variable }
+ * @param {string} params.source              - Data source ('bank_of_israel' | 'fallback')
+ * @param {string} [params.sourceUrl]         - URL of the data source
+ * @returns {object} Firestore-ready mortgage_rates document
+ */
+function createMortgageRatesDocument({
+  date,
+  fetchPeriod,
+  tracks,
+  averages,
+  source,
+  sourceUrl = 'https://www.boi.org.il/en/economic-roles/statistics/',
+}) {
+  if (!date) throw new Error('createMortgageRatesDocument: date is required');
+  if (!tracks || typeof tracks !== 'object') {
+    throw new Error('createMortgageRatesDocument: tracks object is required');
+  }
+  if (!averages || typeof averages !== 'object') {
+    throw new Error('createMortgageRatesDocument: averages object is required');
+  }
+  if (!source) throw new Error('createMortgageRatesDocument: source is required');
+
+  return {
+    date,
+    fetchPeriod: fetchPeriod || null,
+    tracks,
+    averages: {
+      fixed: averages.fixed ?? null,
+      cpi: averages.cpi ?? null,
+      prime: averages.prime ?? null,
+      variable: averages.variable ?? null,
+    },
+    source,
+    sourceUrl,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 // ─── Field Validators ────────────────────────────────────────────────────────
 
 /**
@@ -255,6 +313,32 @@ function validateOfferDocument(doc) {
   return { valid: errors.length === 0, errors };
 }
 
+/**
+ * Validate a mortgage_rates document's required fields.
+ *
+ * @param {object} doc - Partial or full mortgage_rates document
+ * @returns {{ valid: boolean, errors: string[] }}
+ */
+function validateMortgageRatesDocument(doc) {
+  const errors = [];
+  if (!doc.date || typeof doc.date !== 'string') errors.push('date must be a non-empty string');
+  if (!doc.tracks || typeof doc.tracks !== 'object') errors.push('tracks must be an object');
+  if (!doc.averages || typeof doc.averages !== 'object') errors.push('averages must be an object');
+  if (!doc.source || typeof doc.source !== 'string') errors.push('source must be a non-empty string');
+
+  // Validate track types if tracks exist
+  if (doc.tracks && typeof doc.tracks === 'object') {
+    const validTracks = ['fixed', 'cpi', 'prime', 'variable'];
+    for (const key of Object.keys(doc.tracks)) {
+      if (!validTracks.includes(key)) {
+        errors.push(`tracks contains unknown track type: ${key}`);
+      }
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
 // ─── Index Definitions (documentation) ──────────────────────────────────────
 
 /**
@@ -287,6 +371,12 @@ const INDEX_DEFINITIONS = Object.freeze([
     ],
     type: 'composite',
   },
+  {
+    collection: COLLECTIONS.MORTGAGE_RATES,
+    description: 'Single-field index on date (DESC) for latest rates query',
+    fields: [{ fieldPath: 'date', order: 'DESCENDING' }],
+    type: 'single',
+  },
 ]);
 
 // ─── Firestore Index Configuration (firestore.indexes.json format) ───────────
@@ -314,6 +404,9 @@ const FIRESTORE_INDEXES = Object.freeze({
 /** Array of valid offer status strings (for quick includes() checks). */
 const OFFER_STATUS_VALUES = Object.values(OFFER_STATUS);
 
+/** Array of valid rates source strings. */
+const RATES_SOURCE_VALUES = Object.values(RATES_SOURCE);
+
 // ─── Exports ─────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -324,15 +417,21 @@ module.exports = {
   OFFER_STATUS,
   OFFER_STATUS_VALUES,
 
+  // Rates source enum
+  RATES_SOURCE,
+  RATES_SOURCE_VALUES,
+
   // Document factories
   createUserDocument,
   createFinancialDocument,
   createOfferDocument,
+  createMortgageRatesDocument,
 
   // Field validators
   validateUserDocument,
   validateFinancialDocument,
   validateOfferDocument,
+  validateMortgageRatesDocument,
 
   // Index definitions (documentation + CLI config)
   INDEX_DEFINITIONS,
