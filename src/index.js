@@ -18,6 +18,7 @@ const analysisRoutes = require('./routes/analysis');
 const dashboardRoutes = require('./routes/dashboard');
 const ratesRoutes = require('./routes/rates');
 const wizardRoutes = require('./routes/wizard');
+const stripeRoutes = require('./routes/stripe');
 
 // Cron jobs
 const { startRatesCron } = require('./cron/ratesCron');
@@ -34,6 +35,17 @@ app.use(helmetMiddleware);
 app.use(corsMiddleware);
 app.use(apiLimiter);
 app.use(morgan('combined', { stream: { write: (msg) => logger.info(msg.trim()) } }));
+
+// ── Stripe Webhook Route (MUST be before express.json()) ─────────────────────
+// Stripe webhook signature verification requires the raw request body.
+// We mount the webhook endpoint with express.raw() BEFORE the global
+// express.json() middleware so the body is not parsed as JSON.
+app.use(
+  '/api/v1/stripe/webhook',
+  express.raw({ type: 'application/json' })
+);
+
+// Global JSON body parser (for all other routes)
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
@@ -43,6 +55,9 @@ app.use('/api/v1/profile', profileRoutes);
 app.use('/api/v1/offers', offersRoutes);
 app.use('/api/v1/analysis', analysisRoutes);
 app.use('/api/v1/dashboard', dashboardRoutes);
+
+// Stripe payment routes
+app.use('/api/v1/stripe', stripeRoutes);
 
 // Public routes (no auth required)
 app.use('/api/v1/public/rates', ratesRoutes);
@@ -90,6 +105,13 @@ const start = async () => {
     // Start cron jobs
     startRatesCron();
     logger.info('Cron jobs initialised');
+
+    // Log Stripe configuration status
+    if (process.env.STRIPE_SECRET_KEY) {
+      logger.info('Stripe payment integration configured');
+    } else {
+      logger.warn('Stripe payment integration NOT configured (STRIPE_SECRET_KEY missing)');
+    }
   } catch (err) {
     logger.error(`Failed to initialise Firestore: ${err.message}`);
     // In production, exit so the process manager can restart with correct creds

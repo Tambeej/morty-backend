@@ -15,6 +15,7 @@
  *  offers             – many documents per user (auto-generated doc IDs)
  *  mortgage_rates     – BOI average mortgage rates (doc ID == date or 'latest')
  *  community_profiles – anonymized user profiles for community intelligence
+ *  payments           – Stripe payment records (doc ID == Stripe session ID)
  *
  * Indexes
  * ───────
@@ -25,19 +26,21 @@
  *  community_profiles: (incomeBin ASC) – for range queries
  *                      (incomeBin ASC, loanBin ASC) – compound for matching
  *                      profileHash (single-field) – for exact lookups
+ *  payments:           (userId ASC, createdAt DESC) – for payment history
  */
 
 'use strict';
 
 // ─── Collection Names ────────────────────────────────────────────────────────
 
-/** @type {Readonly<{USERS: string, FINANCIALS: string, OFFERS: string, MORTGAGE_RATES: string, COMMUNITY_PROFILES: string}>} */
+/** @type {Readonly<{USERS: string, FINANCIALS: string, OFFERS: string, MORTGAGE_RATES: string, COMMUNITY_PROFILES: string, PAYMENTS: string}>} */
 const COLLECTIONS = Object.freeze({
   USERS: 'users',
   FINANCIALS: 'financials',
   OFFERS: 'offers',
   MORTGAGE_RATES: 'mortgage_rates',
   COMMUNITY_PROFILES: 'community_profiles',
+  PAYMENTS: 'payments',
 });
 
 // ─── Offer Status Enum ───────────────────────────────────────────────────────
@@ -55,6 +58,15 @@ const OFFER_STATUS = Object.freeze({
 const RATES_SOURCE = Object.freeze({
   BOI: 'bank_of_israel',
   FALLBACK: 'fallback',
+});
+
+// ─── Payment Status Enum ─────────────────────────────────────────────────────
+
+/** @type {Readonly<{PENDING: string, COMPLETED: string, EXPIRED: string}>} */
+const PAYMENT_STATUS = Object.freeze({
+  PENDING: 'pending',
+  COMPLETED: 'completed',
+  EXPIRED: 'expired',
 });
 
 // ─── Document Factories ──────────────────────────────────────────────────────
@@ -83,6 +95,7 @@ function createUserDocument({ id, email, password, phone = '', verified = false 
     phone: phone || '',
     verified: Boolean(verified),
     refreshToken: null,
+    paidAnalyses: false,
     createdAt: now,
     updatedAt: now,
   };
@@ -317,6 +330,44 @@ function createCommunityProfileDocument({
   };
 }
 
+/**
+ * Build a new `payments` document.
+ *
+ * Stores a Stripe payment record for audit trail.
+ *
+ * @param {object} params
+ * @param {string} params.sessionId     - Stripe Checkout Session ID (also doc ID)
+ * @param {string} params.userId        - User's Firestore ID
+ * @param {string} [params.portfolioId] - Optional linked portfolio ID
+ * @param {string} [params.product]     - Product identifier (default 'expert_analysis')
+ * @param {string} [params.status]      - Payment status (default 'pending')
+ * @returns {object} Firestore-ready payments document
+ */
+function createPaymentDocument({
+  sessionId,
+  userId,
+  portfolioId = null,
+  product = 'expert_analysis',
+  status = PAYMENT_STATUS.PENDING,
+}) {
+  if (!sessionId) throw new Error('createPaymentDocument: sessionId is required');
+  if (!userId) throw new Error('createPaymentDocument: userId is required');
+  if (!PAYMENT_STATUS_VALUES.includes(status)) {
+    throw new Error(`createPaymentDocument: invalid status '${status}'`);
+  }
+
+  const now = new Date().toISOString();
+  return {
+    sessionId,
+    userId,
+    portfolioId: portfolioId || null,
+    product,
+    status,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 // ─── Field Validators ────────────────────────────────────────────────────────
 
 /**
@@ -443,6 +494,26 @@ function validateCommunityProfileDocument(doc) {
   return { valid: errors.length === 0, errors };
 }
 
+/**
+ * Validate a payments document's required fields.
+ *
+ * @param {object} doc - Partial or full payments document
+ * @returns {{ valid: boolean, errors: string[] }}
+ */
+function validatePaymentDocument(doc) {
+  const errors = [];
+  if (!doc.sessionId || typeof doc.sessionId !== 'string') {
+    errors.push('sessionId must be a non-empty string');
+  }
+  if (!doc.userId || typeof doc.userId !== 'string') {
+    errors.push('userId must be a non-empty string');
+  }
+  if (!PAYMENT_STATUS_VALUES.includes(doc.status)) {
+    errors.push(`status must be one of: ${PAYMENT_STATUS_VALUES.join(', ')}`);
+  }
+  return { valid: errors.length === 0, errors };
+}
+
 // ─── Index Definitions (documentation) ──────────────────────────────────────
 
 /**
@@ -502,6 +573,15 @@ const INDEX_DEFINITIONS = Object.freeze([
     ],
     type: 'composite',
   },
+  {
+    collection: COLLECTIONS.PAYMENTS,
+    description: 'Composite index on userId (ASC) + createdAt (DESC) for payment history',
+    fields: [
+      { fieldPath: 'userId', order: 'ASCENDING' },
+      { fieldPath: 'createdAt', order: 'DESCENDING' },
+    ],
+    type: 'composite',
+  },
 ]);
 
 // ─── Firestore Index Configuration (firestore.indexes.json format) ───────────
@@ -528,6 +608,14 @@ const FIRESTORE_INDEXES = Object.freeze({
         { fieldPath: 'loanBin', order: 'ASCENDING' },
       ],
     },
+    {
+      collectionGroup: COLLECTIONS.PAYMENTS,
+      queryScope: 'COLLECTION',
+      fields: [
+        { fieldPath: 'userId', order: 'ASCENDING' },
+        { fieldPath: 'createdAt', order: 'DESCENDING' },
+      ],
+    },
   ],
   fieldOverrides: [],
 });
@@ -539,6 +627,9 @@ const OFFER_STATUS_VALUES = Object.values(OFFER_STATUS);
 
 /** Array of valid rates source strings. */
 const RATES_SOURCE_VALUES = Object.values(RATES_SOURCE);
+
+/** Array of valid payment status strings. */
+const PAYMENT_STATUS_VALUES = Object.values(PAYMENT_STATUS);
 
 // ─── Exports ─────────────────────────────────────────────────────────────────
 
@@ -554,12 +645,17 @@ module.exports = {
   RATES_SOURCE,
   RATES_SOURCE_VALUES,
 
+  // Payment status enum
+  PAYMENT_STATUS,
+  PAYMENT_STATUS_VALUES,
+
   // Document factories
   createUserDocument,
   createFinancialDocument,
   createOfferDocument,
   createMortgageRatesDocument,
   createCommunityProfileDocument,
+  createPaymentDocument,
 
   // Field validators
   validateUserDocument,
@@ -567,6 +663,7 @@ module.exports = {
   validateOfferDocument,
   validateMortgageRatesDocument,
   validateCommunityProfileDocument,
+  validatePaymentDocument,
 
   // Index definitions (documentation + CLI config)
   INDEX_DEFINITIONS,
