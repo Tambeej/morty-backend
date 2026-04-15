@@ -17,6 +17,7 @@ const offersRoutes = require('./routes/offers');
 const analysisRoutes = require('./routes/analysis');
 const dashboardRoutes = require('./routes/dashboard');
 const ratesRoutes = require('./routes/rates');
+const wizardRoutes = require('./routes/wizard');
 
 // Cron jobs
 const { startRatesCron } = require('./cron/ratesCron');
@@ -45,6 +46,7 @@ app.use('/api/v1/dashboard', dashboardRoutes);
 
 // Public routes (no auth required)
 app.use('/api/v1/public/rates', ratesRoutes);
+app.use('/api/v1/public/wizard', wizardRoutes);
 
 // Health check
 app.get('/health', (_req, res) => res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() }));
