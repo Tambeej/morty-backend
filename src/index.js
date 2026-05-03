@@ -19,7 +19,6 @@ const dashboardRoutes = require('./routes/dashboard');
 const ratesRoutes = require('./routes/rates');
 const wizardRoutes = require('./routes/wizard');
 const stripeRoutes = require('./routes/stripe');
-
 // Cron jobs
 const { startRatesCron } = require('./cron/ratesCron');
 
@@ -30,9 +29,11 @@ const app = express();
 // rate-limiters, and other IP-dependent middleware work correctly.
 app.set('trust proxy', 1);
 
+
 // Security & utility middleware (order matters)
 app.use(helmetMiddleware);
 app.use(corsMiddleware);
+app.options('*', corsMiddleware);
 app.use(apiLimiter);
 app.use(morgan('combined', { stream: { write: (msg) => logger.info(msg.trim()) } }));
 
@@ -85,7 +86,7 @@ app.use((err, _req, res, _next) => {
 });
 
 // ── Start ────────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 
 const start = async () => {
   try {

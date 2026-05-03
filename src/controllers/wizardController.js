@@ -58,6 +58,7 @@ const { sendSuccess, sendError } = require('../utils/response');
  * @param {import('express').Response} res
  */
 exports.submitWizard = async (req, res) => {
+  console.log('RAW BODY:', req.body);
   try {
     const { inputs, consent } = req.body;
 

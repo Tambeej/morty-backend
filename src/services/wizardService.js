@@ -91,7 +91,7 @@ async function generatePortfolios(inputs, consent) {
     rates = { fixed: 4.65, cpi: 3.15, prime: 6.05, variable: 4.95 };
   }
 
-  // 2. Analyse user profile
+  // 2. Analyze user profile
   const profile = portfolioEngine.analyseUserProfile(inputs);
 
   logger.info('wizardService.generatePortfolios: generating portfolios', {
@@ -212,7 +212,7 @@ async function generateWithAI(inputs, rates, scenarioTypes, profile) {
     futureFundsContext = 'None expected';
   } else {
     const amount = inputs.futureFunds.amount || 0;
-    const timeframe = inputs.futureFunds.timeframe.replace(/_/g, ' ');
+    const timeframe = inputs.futureFunds.timeframe;//.replace(/_/g, ' ');
     futureFundsContext = `₪${amount.toLocaleString()} expected ${timeframe}`;
     if (profile.canPrepayEarly) {
       futureFundsContext += ' (near-term – consider prepayable tracks like prime)';
@@ -300,6 +300,7 @@ Respond ONLY with valid JSON in this exact format (no markdown, no explanation):
 
   const content = response.choices[0].message.content;
   const parsed = JSON.parse(content);
+
 
   if (!parsed.portfolios || !Array.isArray(parsed.portfolios)) {
     throw new Error('AI response missing portfolios array');

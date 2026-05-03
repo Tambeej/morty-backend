@@ -28,10 +28,10 @@ const logger = require('../utils/logger');
  */
 function buildCredential() {
   // Option A: file-based service account (GOOGLE_APPLICATION_CREDENTIALS)
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+/*  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     logger.info('Firebase Admin: using GOOGLE_APPLICATION_CREDENTIALS file');
     return admin.credential.applicationDefault();
-  }
+  }*/
 
   // Option B: individual env vars (CI / Render)
   const { FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY } = process.env;
