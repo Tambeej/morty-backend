@@ -43,7 +43,8 @@ const getAllowedOrigins = () => {
       'http://localhost:3000',
       'http://localhost:5173', // Vite default
       'http://127.0.0.1:3000',
-      'http://127.0.0.1:5173'
+      'http://127.0.0.1:5173',
+        'https://morty-app.onrender.com'
     );
   }
 
@@ -71,7 +72,7 @@ const corsMiddleware = cors({
     }
 
     logger.logSecurity('CORS_BLOCKED', { origin, allowedOrigins });
-    return callback(new Error(`CORS: Origin '${origin}' not allowed`));
+    return callback(null, false);
   },
   credentials: true, // Allow cookies and Authorization headers
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],

@@ -9,7 +9,7 @@
  */
 
 'use strict';
-
+const { USE_WIZARD_MOCK } = require('../config/devConfig');
 const OpenAI = require('openai');
 const offerService = require('./offerService');
 const logger = require('../utils/logger');
@@ -34,7 +34,7 @@ exports.analyzeOffer = async (offerId) => {
   if (!offer) throw new Error(`Offer ${offerId} not found`);
 
   try {
-    if (!openai) {
+    if (!openai || (USE_WIZARD_MOCK)) {
       // Mock analysis when OpenAI key is not configured (dev/test)
       logger.warn('OPENAI_API_KEY not set – using mock analysis');
 

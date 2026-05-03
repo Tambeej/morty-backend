@@ -10,26 +10,37 @@
  *
  * Collections
  * ───────────
- *  users      – one document per registered user (doc ID == user UID)
- *  financials – one document per user (doc ID == userId)
- *  offers     – many documents per user (auto-generated doc IDs)
+ *  users              – one document per registered user (doc ID == user UID)
+ *  financials         – one document per user (doc ID == userId)
+ *  offers             – many documents per user (auto-generated doc IDs)
+ *  mortgage_rates     – BOI average mortgage rates (doc ID == date or 'latest')
+ *  community_profiles – anonymized user profiles for community intelligence
+ *  payments           – Stripe payment records (doc ID == Stripe session ID)
  *
  * Indexes
  * ───────
- *  users:      email (single-field, ascending) – for login lookup
- *  financials: userId (single-field, ascending) – for profile fetch
- *  offers:     (userId ASC, createdAt DESC) – composite, for list queries
+ *  users:              email (single-field, ascending) – for login lookup
+ *  financials:         userId (single-field, ascending) – for profile fetch
+ *  offers:             (userId ASC, createdAt DESC) – composite, for list queries
+ *  mortgage_rates:     (date DESC) – for historical queries
+ *  community_profiles: (incomeBin ASC) – for range queries
+ *                      (incomeBin ASC, loanBin ASC) – compound for matching
+ *                      profileHash (single-field) – for exact lookups
+ *  payments:           (userId ASC, createdAt DESC) – for payment history
  */
 
 'use strict';
 
 // ─── Collection Names ────────────────────────────────────────────────────────
 
-/** @type {Readonly<{USERS: string, FINANCIALS: string, OFFERS: string}>} */
+/** @type {Readonly<{USERS: string, FINANCIALS: string, OFFERS: string, MORTGAGE_RATES: string, COMMUNITY_PROFILES: string, PAYMENTS: string}>} */
 const COLLECTIONS = Object.freeze({
   USERS: 'users',
   FINANCIALS: 'financials',
   OFFERS: 'offers',
+  MORTGAGE_RATES: 'mortgage_rates',
+  COMMUNITY_PROFILES: 'community_profiles',
+  PAYMENTS: 'payments',
 });
 
 // ─── Offer Status Enum ───────────────────────────────────────────────────────
@@ -39,6 +50,23 @@ const OFFER_STATUS = Object.freeze({
   PENDING: 'pending',
   ANALYZED: 'analyzed',
   ERROR: 'error',
+});
+
+// ─── Rates Source Enum ───────────────────────────────────────────────────────
+
+/** @type {Readonly<{BOI: string, FALLBACK: string}>} */
+const RATES_SOURCE = Object.freeze({
+  BOI: 'bank_of_israel',
+  FALLBACK: 'fallback',
+});
+
+// ─── Payment Status Enum ─────────────────────────────────────────────────────
+
+/** @type {Readonly<{PENDING: string, COMPLETED: string, EXPIRED: string}>} */
+const PAYMENT_STATUS = Object.freeze({
+  PENDING: 'pending',
+  COMPLETED: 'completed',
+  EXPIRED: 'expired',
 });
 
 // ─── Document Factories ──────────────────────────────────────────────────────
@@ -67,6 +95,7 @@ function createUserDocument({ id, email, password, phone = '', verified = false 
     phone: phone || '',
     verified: Boolean(verified),
     refreshToken: null,
+    paidAnalyses: false,
     createdAt: now,
     updatedAt: now,
   };
@@ -190,6 +219,155 @@ function createOfferDocument({
   };
 }
 
+/**
+ * Build a new `mortgage_rates` document.
+ *
+ * @param {object} params
+ * @param {string} params.date                - ISO date string of the fetch
+ * @param {object} params.fetchPeriod         - Period covered
+ * @param {string} params.fetchPeriod.start   - Start period (YYYY-MM)
+ * @param {string} params.fetchPeriod.end     - End period (YYYY-MM)
+ * @param {object} params.tracks              - Track data by type
+ * @param {object} params.averages            - Flat averages { fixed, cpi, prime, variable }
+ * @param {string} params.source              - Data source ('bank_of_israel' | 'fallback')
+ * @param {string} [params.sourceUrl]         - URL of the data source
+ * @returns {object} Firestore-ready mortgage_rates document
+ */
+function createMortgageRatesDocument({
+  date,
+  fetchPeriod,
+  tracks,
+  averages,
+  source,
+  sourceUrl = 'https://www.boi.org.il/en/economic-roles/statistics/',
+}) {
+  if (!date) throw new Error('createMortgageRatesDocument: date is required');
+  if (!tracks || typeof tracks !== 'object') {
+    throw new Error('createMortgageRatesDocument: tracks object is required');
+  }
+  if (!averages || typeof averages !== 'object') {
+    throw new Error('createMortgageRatesDocument: averages object is required');
+  }
+  if (!source) throw new Error('createMortgageRatesDocument: source is required');
+
+  return {
+    date,
+    fetchPeriod: fetchPeriod || null,
+    tracks,
+    averages: {
+      fixed: averages.fixed ?? null,
+      cpi: averages.cpi ?? null,
+      prime: averages.prime ?? null,
+      variable: averages.variable ?? null,
+    },
+    source,
+    sourceUrl,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Build a new `community_profiles` document.
+ *
+ * Stores an anonymized user profile for community intelligence matching.
+ * No PII is stored – only binned financial data and bank/branch/rates.
+ *
+ * @param {object} params
+ * @param {string} params.profileHash       - SHA-256 hash of binned profile
+ * @param {number} params.incomeBin         - Binned monthly income
+ * @param {number} params.loanBin           - Binned loan amount
+ * @param {number} params.ltvBin            - Binned LTV percentage
+ * @param {number} params.stabilityBin      - Binned stability preference
+ * @param {string} [params.bank]            - Bank name (Hebrew)
+ * @param {string} [params.branch]          - Branch name (Hebrew)
+ * @param {object} [params.rates]           - Actual rates received
+ * @param {number} [params.rates.fixed]     - Fixed rate
+ * @param {number} [params.rates.cpi]       - CPI-indexed rate
+ * @param {number} [params.rates.prime]     - Prime rate
+ * @param {number} [params.rates.variable]  - Variable rate
+ * @param {number} [params.weightedRate]    - Weighted average rate
+ * @returns {object} Firestore-ready community_profiles document
+ */
+function createCommunityProfileDocument({
+  profileHash,
+  incomeBin,
+  loanBin,
+  ltvBin,
+  stabilityBin,
+  bank = null,
+  branch = null,
+  rates = null,
+  weightedRate = null,
+}) {
+  if (!profileHash) throw new Error('createCommunityProfileDocument: profileHash is required');
+  if (incomeBin === undefined || incomeBin === null) {
+    throw new Error('createCommunityProfileDocument: incomeBin is required');
+  }
+  if (loanBin === undefined || loanBin === null) {
+    throw new Error('createCommunityProfileDocument: loanBin is required');
+  }
+  if (ltvBin === undefined || ltvBin === null) {
+    throw new Error('createCommunityProfileDocument: ltvBin is required');
+  }
+  if (stabilityBin === undefined || stabilityBin === null) {
+    throw new Error('createCommunityProfileDocument: stabilityBin is required');
+  }
+
+  const now = new Date().toISOString();
+  return {
+    profileHash,
+    incomeBin: Number(incomeBin),
+    loanBin: Number(loanBin),
+    ltvBin: Number(ltvBin),
+    stabilityBin: Number(stabilityBin),
+    bank: bank || null,
+    branch: branch || null,
+    rates: rates || null,
+    weightedRate: weightedRate != null ? Number(weightedRate) : null,
+    consent: true,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Build a new `payments` document.
+ *
+ * Stores a Stripe payment record for audit trail.
+ *
+ * @param {object} params
+ * @param {string} params.sessionId     - Stripe Checkout Session ID (also doc ID)
+ * @param {string} params.userId        - User's Firestore ID
+ * @param {string} [params.portfolioId] - Optional linked portfolio ID
+ * @param {string} [params.product]     - Product identifier (default 'expert_analysis')
+ * @param {string} [params.status]      - Payment status (default 'pending')
+ * @returns {object} Firestore-ready payments document
+ */
+function createPaymentDocument({
+  sessionId,
+  userId,
+  portfolioId = null,
+  product = 'expert_analysis',
+  status = PAYMENT_STATUS.PENDING,
+}) {
+  if (!sessionId) throw new Error('createPaymentDocument: sessionId is required');
+  if (!userId) throw new Error('createPaymentDocument: userId is required');
+  if (!PAYMENT_STATUS_VALUES.includes(status)) {
+    throw new Error(`createPaymentDocument: invalid status '${status}'`);
+  }
+
+  const now = new Date().toISOString();
+  return {
+    sessionId,
+    userId,
+    portfolioId: portfolioId || null,
+    product,
+    status,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 // ─── Field Validators ────────────────────────────────────────────────────────
 
 /**
@@ -255,6 +433,87 @@ function validateOfferDocument(doc) {
   return { valid: errors.length === 0, errors };
 }
 
+/**
+ * Validate a mortgage_rates document's required fields.
+ *
+ * @param {object} doc - Partial or full mortgage_rates document
+ * @returns {{ valid: boolean, errors: string[] }}
+ */
+function validateMortgageRatesDocument(doc) {
+  const errors = [];
+  if (!doc.date || typeof doc.date !== 'string') errors.push('date must be a non-empty string');
+  if (!doc.tracks || typeof doc.tracks !== 'object') errors.push('tracks must be an object');
+  if (!doc.averages || typeof doc.averages !== 'object') errors.push('averages must be an object');
+  if (!doc.source || typeof doc.source !== 'string') errors.push('source must be a non-empty string');
+
+  // Validate track types if tracks exist
+  if (doc.tracks && typeof doc.tracks === 'object') {
+    const validTracks = ['fixed', 'cpi', 'prime', 'variable'];
+    for (const key of Object.keys(doc.tracks)) {
+      if (!validTracks.includes(key)) {
+        errors.push(`tracks contains unknown track type: ${key}`);
+      }
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate a community_profiles document's required fields.
+ *
+ * @param {object} doc - Partial or full community_profiles document
+ * @returns {{ valid: boolean, errors: string[] }}
+ */
+function validateCommunityProfileDocument(doc) {
+  const errors = [];
+  if (!doc.profileHash || typeof doc.profileHash !== 'string') {
+    errors.push('profileHash must be a non-empty string');
+  }
+  if (typeof doc.incomeBin !== 'number' || doc.incomeBin < 0) {
+    errors.push('incomeBin must be a non-negative number');
+  }
+  if (typeof doc.loanBin !== 'number' || doc.loanBin < 0) {
+    errors.push('loanBin must be a non-negative number');
+  }
+  if (typeof doc.ltvBin !== 'number' || doc.ltvBin < 0) {
+    errors.push('ltvBin must be a non-negative number');
+  }
+  if (typeof doc.stabilityBin !== 'number') {
+    errors.push('stabilityBin must be a number');
+  }
+  if (doc.consent !== true) {
+    errors.push('consent must be true');
+  }
+  if (doc.rates !== null && typeof doc.rates !== 'object') {
+    errors.push('rates must be an object or null');
+  }
+  if (doc.weightedRate !== null && typeof doc.weightedRate !== 'number') {
+    errors.push('weightedRate must be a number or null');
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate a payments document's required fields.
+ *
+ * @param {object} doc - Partial or full payments document
+ * @returns {{ valid: boolean, errors: string[] }}
+ */
+function validatePaymentDocument(doc) {
+  const errors = [];
+  if (!doc.sessionId || typeof doc.sessionId !== 'string') {
+    errors.push('sessionId must be a non-empty string');
+  }
+  if (!doc.userId || typeof doc.userId !== 'string') {
+    errors.push('userId must be a non-empty string');
+  }
+  if (!PAYMENT_STATUS_VALUES.includes(doc.status)) {
+    errors.push(`status must be one of: ${PAYMENT_STATUS_VALUES.join(', ')}`);
+  }
+  return { valid: errors.length === 0, errors };
+}
+
 // ─── Index Definitions (documentation) ──────────────────────────────────────
 
 /**
@@ -287,6 +546,42 @@ const INDEX_DEFINITIONS = Object.freeze([
     ],
     type: 'composite',
   },
+  {
+    collection: COLLECTIONS.MORTGAGE_RATES,
+    description: 'Single-field index on date (DESC) for latest rates query',
+    fields: [{ fieldPath: 'date', order: 'DESCENDING' }],
+    type: 'single',
+  },
+  {
+    collection: COLLECTIONS.COMMUNITY_PROFILES,
+    description: 'Single-field index on profileHash for exact lookups',
+    fields: [{ fieldPath: 'profileHash', order: 'ASCENDING' }],
+    type: 'single',
+  },
+  {
+    collection: COLLECTIONS.COMMUNITY_PROFILES,
+    description: 'Composite index on incomeBin (ASC) for range queries with ordering',
+    fields: [{ fieldPath: 'incomeBin', order: 'ASCENDING' }],
+    type: 'single',
+  },
+  {
+    collection: COLLECTIONS.COMMUNITY_PROFILES,
+    description: 'Composite index on incomeBin (ASC) + loanBin (ASC) for compound matching',
+    fields: [
+      { fieldPath: 'incomeBin', order: 'ASCENDING' },
+      { fieldPath: 'loanBin', order: 'ASCENDING' },
+    ],
+    type: 'composite',
+  },
+  {
+    collection: COLLECTIONS.PAYMENTS,
+    description: 'Composite index on userId (ASC) + createdAt (DESC) for payment history',
+    fields: [
+      { fieldPath: 'userId', order: 'ASCENDING' },
+      { fieldPath: 'createdAt', order: 'DESCENDING' },
+    ],
+    type: 'composite',
+  },
 ]);
 
 // ─── Firestore Index Configuration (firestore.indexes.json format) ───────────
@@ -305,6 +600,22 @@ const FIRESTORE_INDEXES = Object.freeze({
         { fieldPath: 'createdAt', order: 'DESCENDING' },
       ],
     },
+    {
+      collectionGroup: COLLECTIONS.COMMUNITY_PROFILES,
+      queryScope: 'COLLECTION',
+      fields: [
+        { fieldPath: 'incomeBin', order: 'ASCENDING' },
+        { fieldPath: 'loanBin', order: 'ASCENDING' },
+      ],
+    },
+    {
+      collectionGroup: COLLECTIONS.PAYMENTS,
+      queryScope: 'COLLECTION',
+      fields: [
+        { fieldPath: 'userId', order: 'ASCENDING' },
+        { fieldPath: 'createdAt', order: 'DESCENDING' },
+      ],
+    },
   ],
   fieldOverrides: [],
 });
@@ -313,6 +624,12 @@ const FIRESTORE_INDEXES = Object.freeze({
 
 /** Array of valid offer status strings (for quick includes() checks). */
 const OFFER_STATUS_VALUES = Object.values(OFFER_STATUS);
+
+/** Array of valid rates source strings. */
+const RATES_SOURCE_VALUES = Object.values(RATES_SOURCE);
+
+/** Array of valid payment status strings. */
+const PAYMENT_STATUS_VALUES = Object.values(PAYMENT_STATUS);
 
 // ─── Exports ─────────────────────────────────────────────────────────────────
 
@@ -324,15 +641,29 @@ module.exports = {
   OFFER_STATUS,
   OFFER_STATUS_VALUES,
 
+  // Rates source enum
+  RATES_SOURCE,
+  RATES_SOURCE_VALUES,
+
+  // Payment status enum
+  PAYMENT_STATUS,
+  PAYMENT_STATUS_VALUES,
+
   // Document factories
   createUserDocument,
   createFinancialDocument,
   createOfferDocument,
+  createMortgageRatesDocument,
+  createCommunityProfileDocument,
+  createPaymentDocument,
 
   // Field validators
   validateUserDocument,
   validateFinancialDocument,
   validateOfferDocument,
+  validateMortgageRatesDocument,
+  validateCommunityProfileDocument,
+  validatePaymentDocument,
 
   // Index definitions (documentation + CLI config)
   INDEX_DEFINITIONS,

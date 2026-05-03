@@ -324,12 +324,15 @@ exports.googleAuth = async (req, res) => {
   try {
     const { idToken } = req.body;
 
+
     // ── Step 1: Verify the Firebase ID token via Admin SDK ────────────────────
     // verifyIdToken checks the token signature, audience (project ID),
     // issuer, and expiry. It rejects replayed or tampered tokens.
     let decodedToken;
     try {
       decodedToken = await admin.auth().verifyIdToken(idToken);
+      console.log('✅ Decoded:', decodedToken);
+
     } catch (firebaseErr) {
       logger.warn(
         `authController.googleAuth: Firebase token verification failed – ${firebaseErr.message}`

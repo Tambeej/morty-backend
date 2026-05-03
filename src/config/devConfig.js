@@ -1,0 +1,1 @@
+module.exports = { USE_WIZARD_MOCK: true };   

@@ -25,6 +25,7 @@ const db = require('../src/config/firestore');
 const {
   COLLECTIONS,
   OFFER_STATUS,
+  RATES_SOURCE,
   INDEX_DEFINITIONS,
 } = require('../src/config/collections');
 
@@ -76,6 +77,44 @@ const SENTINEL_DOCS = [
       extractedData: { bank: '', amount: null, rate: null, term: null },
       analysis: { recommendedRate: null, savings: null, aiReasoning: '' },
       status: OFFER_STATUS.PENDING,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      _sentinel: true,
+    },
+  },
+  {
+    collection: COLLECTIONS.MORTGAGE_RATES,
+    id: '_sentinel',
+    data: {
+      date: new Date().toISOString(),
+      fetchPeriod: { start: '2024-01', end: '2025-03' },
+      tracks: {
+        fixed: { label: 'קבועה לא צמודה (קל"צ)', average: null, latest: null, monthlyData: [], count: 0 },
+        cpi: { label: 'צמוד מדד', average: null, latest: null, monthlyData: [], count: 0 },
+        prime: { label: 'פריים', average: null, latest: null, monthlyData: [], count: 0 },
+        variable: { label: 'משתנה לא צמודה', average: null, latest: null, monthlyData: [], count: 0 },
+      },
+      averages: { fixed: null, cpi: null, prime: null, variable: null },
+      source: RATES_SOURCE.FALLBACK,
+      sourceUrl: 'https://www.boi.org.il/en/economic-roles/statistics/',
+      updatedAt: new Date().toISOString(),
+      _sentinel: true,
+    },
+  },
+  {
+    collection: COLLECTIONS.COMMUNITY_PROFILES,
+    id: '_sentinel',
+    data: {
+      profileHash: '__sentinel__',
+      incomeBin: 0,
+      loanBin: 0,
+      ltvBin: 0,
+      stabilityBin: 0,
+      bank: null,
+      branch: null,
+      rates: null,
+      weightedRate: null,
+      consent: true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       _sentinel: true,
