@@ -14,7 +14,7 @@ const ratesController = require('../controllers/ratesController');
 const rateLimit = require('express-rate-limit');
 
 /**
- * Rate limiter for public rates endpoint.
+ * Rate limiter for public rates' endpoint.
  * 30 requests per 15 minutes per IP – generous for a read-only cached endpoint.
  */
 const ratesLimiter = rateLimit({

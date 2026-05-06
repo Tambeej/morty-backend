@@ -19,8 +19,13 @@ const dashboardRoutes = require('./routes/dashboard');
 const ratesRoutes = require('./routes/rates');
 const wizardRoutes = require('./routes/wizard');
 const stripeRoutes = require('./routes/stripe');
+const mortgageCaseRoutes = require('./routes/mortgageCaseRoutes');
 // Cron jobs
 const { startRatesCron } = require('./cron/ratesCron');
+
+
+
+const wizardPrivateRoutes = require('./routes/wizardPrivateRoutes');
 
 // ── App setup ────────────────────────────────────────────────────────────────
 const app = express();
@@ -30,6 +35,7 @@ const app = express();
 app.set('trust proxy', 1);
 
 
+app.use('/api/v1/wizard', wizardPrivateRoutes);
 // Security & utility middleware (order matters)
 app.use(helmetMiddleware);
 app.use(corsMiddleware);
@@ -52,6 +58,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ── Routes ───────────────────────────────────────────────────────────────────
 app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1/auth', mortgageCaseRoutes);
 app.use('/api/v1/profile', profileRoutes);
 app.use('/api/v1/offers', offersRoutes);
 app.use('/api/v1/analysis', analysisRoutes);
