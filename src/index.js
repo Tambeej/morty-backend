@@ -19,8 +19,13 @@ const dashboardRoutes = require('./routes/dashboard');
 const ratesRoutes = require('./routes/rates');
 const wizardRoutes = require('./routes/wizard');
 const stripeRoutes = require('./routes/stripe');
+const mortgageCaseRoutes = require('./routes/mortgageCaseRoutes');
 // Cron jobs
 const { startRatesCron } = require('./cron/ratesCron');
+
+
+
+const wizardPrivateRoutes = require('./routes/wizardPrivateRoutes');
 
 // ── App setup ────────────────────────────────────────────────────────────────
 const app = express();
@@ -37,6 +42,7 @@ app.options('*', corsMiddleware);
 app.use(apiLimiter);
 app.use(morgan('combined', { stream: { write: (msg) => logger.info(msg.trim()) } }));
 
+app.use('/api/v1/wizard', wizardPrivateRoutes);
 // ── Stripe Webhook Route (MUST be before express.json()) ─────────────────────
 // Stripe webhook signature verification requires the raw request body.
 // We mount the webhook endpoint with express.raw() BEFORE the global
@@ -52,6 +58,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ── Routes ───────────────────────────────────────────────────────────────────
 app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1/auth', mortgageCaseRoutes);
 app.use('/api/v1/profile', profileRoutes);
 app.use('/api/v1/offers', offersRoutes);
 app.use('/api/v1/analysis', analysisRoutes);

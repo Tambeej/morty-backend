@@ -56,7 +56,7 @@ function buildCredential() {
 }
 
 /**
- * Initialise (or reuse) the default firebase-admin app.
+ * Initialize (or reuse) the default firebase-admin app.
  *
  * @returns {admin.app.App}
  */

@@ -14,7 +14,7 @@ const ratesController = require('../controllers/ratesController');
 const rateLimit = require('express-rate-limit');
 
 /**
- * Rate limiter for public rates endpoint.
+ * Rate limiter for public rates' endpoint.
  * 30 requests per 15 minutes per IP – generous for a read-only cached endpoint.
  */
 const ratesLimiter = rateLimit({
@@ -36,6 +36,8 @@ const ratesLimiter = rateLimit({
  * @desc   Get latest Bank of Israel average mortgage rates
  * @access Public (no auth required)
  */
-router.get('/latest', ratesLimiter, ratesController.getLatestRates);
+const { getLatestRates } = require('../controllers/ratesController');
+
+router.get('/latest', ratesLimiter, getLatestRates);
 
 module.exports = router;
