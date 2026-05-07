@@ -1,50 +1,61 @@
 {
   "name": "morty-backend",
   "version": "1.0.0",
-  "description": "Morty – AI-powered mortgage analysis backend",
+  "description": "Morty AI-powered mortgage analysis backend",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "jest --forceExit --detectOpenHandles",
-    "test:coverage": "jest --coverage --forceExit --detectOpenHandles",
-    "fetch-rates": "node scripts/fetchRates.js"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "test": "jest --runInBand --forceExit",
+    "test:coverage": "jest --coverage --runInBand --forceExit",
+    "lint": "eslint src/ --ext .js"
   },
   "dependencies": {
-    "axios": "^1.7.2",
-    "bcryptjs": "^2.4.3",
-    "cloudinary": "^2.9.0",
-    "cors": "^2.8.6",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "express-rate-limit": "^7.3.1",
-    "firebase-admin": "^10.3.0",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "firebase-admin": "^11.11.1",
+    "openai": "^4.20.1",
+    "stripe": "^14.5.0",
+    "cors": "^2.8.5",
     "helmet": "^7.1.0",
-    "joi": "^17.13.1",
-    "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
-    "multer": "^1.4.5-lts.1",
+    "dotenv": "^16.3.1",
+    "joi": "^17.11.0",
+    "winston": "^3.11.0",
     "node-cron": "^3.0.3",
-    "nodemailer": "^8.0.5",
-    "openai": "^4.52.0",
-    "stripe": "^17.4.0",
-    "winston": "^3.13.0"
+    "axios": "^1.6.2",
+    "multer": "^1.4.5-lts.1",
+    "cloudinary": "^1.41.3",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "jest": "^29.7.0",
-    "node-mocks-http": "^1.14.1",
-    "nodemon": "^3.1.4",
-    "supertest": "^7.0.0"
+    "supertest": "^6.3.3",
+    "nodemon": "^3.0.2",
+    "eslint": "^8.54.0"
   },
   "jest": {
     "testEnvironment": "node",
     "testMatch": [
       "**/__tests__/**/*.test.js",
-      "**/src/tests/**/*.test.js",
-      "**/src/__tests__/**/*.test.js"
-    ]
+      "**/src/__tests__/**/*.test.js",
+      "**/src/tests/**/*.test.js"
+    ],
+    "collectCoverageFrom": [
+      "src/**/*.js",
+      "!src/index.js",
+      "!src/config/**",
+      "!src/cron/**"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "branches": 70,
+        "functions": 70,
+        "lines": 70,
+        "statements": 70
+      }
+    }
   }
 }

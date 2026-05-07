@@ -1,58 +1,34 @@
-/**
- * Joi validation middleware factory.
- *
- * Creates an Express middleware that validates `req.body` against
- * the provided Joi schema. On validation failure, returns a 400
- * response with detailed error messages.
- *
- * Usage:
- *   const { validate } = require('../middleware/validate');
- *   const { mySchema } = require('../validators/myValidator');
- *   router.post('/endpoint', validate(mySchema), controller.handler);
- *
- * @module middleware/validate
- */
-
 'use strict';
 
-/**
- * Create a validation middleware for the given Joi schema.
- *
- * @param {import('joi').ObjectSchema} schema - Joi validation schema
- * @param {string} [property='body'] - Request property to validate ('body', 'query', 'params')
- * @returns {import('express').RequestHandler} Express middleware
- */
-const validate = (schema, property = 'body') => {
-  return (req, res, next) => {
-    if (!schema || typeof schema.validate !== 'function') {
-      return next();
-    }
+const { ValidationError } = require('../utils/errors');
 
-    const { error, value } = schema.validate(req[property], {
+/**
+ * Creates an Express middleware that validates `req.params`, `req.query`,
+ * or `req.body` against a Joi schema.
+ *
+ * @param {import('joi').Schema} schema - Joi schema to validate against.
+ * @param {'body'|'params'|'query'} [source='body'] - Which part of the request to validate.
+ * @returns {import('express').RequestHandler}
+ */
+function validate(schema, source = 'body') {
+  return (req, res, next) => {
+    const { error, value } = schema.validate(req[source], {
       abortEarly: false,
-      stripUnknown: false,
-      allowUnknown: true,
+      stripUnknown: true,
     });
 
     if (error) {
       const details = error.details.map((d) => ({
-
         field: d.path.join('.'),
         message: d.message,
       }));
-
-
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: details,
-      });
+      return next(new ValidationError('Validation failed', details));
     }
 
-    // Replace the request property with the validated (and possibly coerced) value
-    req[property] = value;
-    next();
+    // Replace the source with the sanitised value
+    req[source] = value;
+    return next();
   };
-};
+}
 
 module.exports = { validate };

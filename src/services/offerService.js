@@ -22,6 +22,7 @@
  *     recommendedRate: number|null
  *     savings:         number|null
  *     aiReasoning:     string  (default '')
+ *     enhanced:        object|null  (set by updateEnhancedAnalysis, if paid)
  *   }
  *   status:    'pending'|'analyzed'|'error'  (default 'pending')
  *   createdAt: ISO string
@@ -31,6 +32,7 @@
  * Indexes required in Firestore console:
  *   Collection: offers
  *   Fields:     userId ASC, createdAt DESC
+ *   Fields:     userId ASC, status ASC, updatedAt DESC  (for enhanced queries)
  */
 
 'use strict';
@@ -438,6 +440,70 @@ async function deleteOffer(offerId, userId, deleteFile = true) {
   }
 }
 
+// ── Enhanced Analysis ─────────────────────────────────────────────────────────
+
+/**
+ * Store the enhanced AI report in `offer.analysis.enhanced` using a
+ * Firestore transaction with an idempotent "if not exists" guard.
+ *
+ * If `analysis.enhanced` already exists on the document, the write is
+ * skipped and the existing report is returned instead. This prevents:
+ *   - Concurrent requests from overwriting a completed report.
+ *   - Accidental re-generation charges (AI tokens, Stripe).
+ *
+ * @param {string} offerId        - Firestore document ID of the offer.
+ * @param {object} enhancedReport - The enhanced report data to store.
+ * @returns {Promise<{ stored: boolean, report: object }>}
+ *   stored: true  → report was written to Firestore.
+ *   stored: false → report already existed; existing report returned.
+ * @throws {Error} If offerId is missing or the Firestore transaction fails.
+ */
+async function updateEnhancedAnalysis(offerId, enhancedReport) {
+  if (!offerId) throw new Error('offerId is required for updateEnhancedAnalysis');
+
+  const offerRef = offersRef().doc(offerId);
+
+  try {
+    let stored = false;
+    let resultReport = enhancedReport;
+
+    await db.runTransaction(async (transaction) => {
+      const offerSnap = await transaction.get(offerRef);
+
+      if (!offerSnap.exists) {
+        throw new Error(`Offer '${offerId}' not found during enhanced analysis storage`);
+      }
+
+      const offerData = offerSnap.data();
+
+      // Idempotency guard: skip write if enhanced report already exists
+      if (offerData.analysis && offerData.analysis.enhanced) {
+        logger.info('Enhanced analysis already exists, skipping write (idempotent)', { offerId });
+        resultReport = offerData.analysis.enhanced;
+        stored = false;
+        return; // abort write, keep existing
+      }
+
+      // Write the enhanced report
+      transaction.update(offerRef, {
+        'analysis.enhanced': enhancedReport,
+        updatedAt: new Date().toISOString(),
+      });
+
+      stored = true;
+    });
+
+    if (stored) {
+      logger.info('Enhanced analysis stored successfully', { offerId });
+    }
+
+    return { stored, report: resultReport };
+  } catch (err) {
+    logger.error(`offerService.updateEnhancedAnalysis error (id=${offerId}): ${err.message}`);
+    throw err;
+  }
+}
+
 // ── Upload helper ─────────────────────────────────────────────────────────────
 
 /**
@@ -495,6 +561,8 @@ module.exports = {
   saveAnalysisResults,
   markOfferError,
   deleteOffer,
+  // Enhanced analysis (paid feature)
+  updateEnhancedAnalysis,
   // Upload
   uploadFileToCloudinary,
   // Internal helpers (exported for testing)

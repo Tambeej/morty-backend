@@ -1,614 +1,332 @@
-/**
- * Report Service Tests
- *
- * Tests for the enhanced OCR analysis report generation service.
- * Covers comparison building, savings estimation, portfolio validation,
- * rule-based report generation, and sanitization helpers.
- */
-
 'use strict';
 
-// Mock dependencies before requiring the module
-jest.mock('../src/config/firestore', () => {
-  const mockCollection = jest.fn(() => ({
-    doc: jest.fn(() => ({
-      get: jest.fn().mockResolvedValue({ exists: true, data: () => ({}) }),
-      set: jest.fn().mockResolvedValue(undefined),
-      update: jest.fn().mockResolvedValue(undefined),
-    })),
-    add: jest.fn().mockResolvedValue({ id: 'mock-id' }),
-    where: jest.fn().mockReturnThis(),
-    orderBy: jest.fn().mockReturnThis(),
-    limit: jest.fn().mockReturnThis(),
-    get: jest.fn().mockResolvedValue({ empty: true, docs: [], size: 0 }),
-  }));
-  return {
-    collection: mockCollection,
-    batch: jest.fn(() => ({
-      set: jest.fn(),
-      commit: jest.fn().mockResolvedValue(undefined),
-    })),
-  };
-});
+/**
+ * Unit tests for reportService.
+ */
 
-jest.mock('../src/services/offerService', () => ({
-  findByIdAndUserId: jest.fn(),
-  updateOffer: jest.fn().mockResolvedValue({}),
-}));
+jest.mock('../src/services/aiService');
+jest.mock('../src/services/offerService');
 
-jest.mock('../src/services/ratesService', () => ({
-  getCurrentAverages: jest.fn().mockResolvedValue({
-    fixed: 4.65,
-    cpi: 3.15,
-    prime: 6.05,
-    variable: 4.95,
-  }),
-}));
+const { callGPT } = require('../src/services/aiService');
+const { updateEnhancedAnalysis } = require('../src/services/offerService');
+const {
+  buildComparison,
+  sanitizeTrick,
+  sanitizeInsight,
+  generateFallbackReport,
+  generateEnhancedReport,
+} = require('../src/services/reportService');
 
-jest.mock('../src/utils/logger', () => ({
-  info: jest.fn(),
-  warn: jest.fn(),
-  error: jest.fn(),
-  debug: jest.fn(),
-}));
+// ─── Fixtures ─────────────────────────────────────────────────────────────────
 
-const reportService = require('../src/services/reportService');
-const offerService = require('../src/services/offerService');
-const ratesService = require('../src/services/ratesService');
-
-// ── Test Data ─────────────────────────────────────────────────────────────────
+const mockOffer = {
+  id: 'offer123',
+  userId: 'user456',
+  bankName: 'Bank Hapoalim',
+  status: 'analyzed',
+  analysis: {
+    terms: {
+      loanAmount: 1500000,
+      termYears: 25,
+      interestRate: 5.2,
+      tracks: [
+        { type: 'fixed', name: 'קל"צ', rate: 5.2 },
+      ],
+    },
+  },
+};
 
 const mockPortfolio = {
-  id: 'market_standard',
-  type: 'market_standard',
-  name: 'Market Standard',
-  nameHe: 'תיק שוק סטנדרטי',
-  termYears: 30,
+  id: 'portfolio789',
+  userId: 'user456',
+  averageRate: 4.75,
   tracks: [
-    { type: 'fixed', percentage: 34, rate: 4.75, rateDisplay: '4.75%', amount: 408000 },
-    { type: 'prime', percentage: 33, rate: 5.9, rateDisplay: 'P-0.15%', amount: 396000 },
-    { type: 'cpi', percentage: 33, rate: 3.2, rateDisplay: '3.20% + מדד', amount: 396000 },
+    { type: 'fixed', name: 'קל"צ', rate: 4.75, amount: 750000 },
+    { type: 'prime', name: 'פריים', rate: 4.5, amount: 750000 },
   ],
-  monthlyRepayment: 5200,
-  totalCost: 1872000,
-  totalInterest: 672000,
 };
 
-const mockAnalyzedOffer = {
-  id: 'offer-123',
-  userId: 'user-456',
-  originalFile: { url: 'https://example.com/file.pdf', mimetype: 'application/pdf' },
-  extractedData: {
-    bank: 'בנק לאומי',
-    amount: 1200000,
-    rate: 5.2,
-    term: 25,
-  },
-  analysis: {
-    recommendedRate: 4.5,
-    savings: 48000,
-    aiReasoning: 'Mock analysis reasoning',
-  },
-  status: 'analyzed',
-  createdAt: '2025-01-01T00:00:00.000Z',
-  updatedAt: '2025-01-01T00:00:00.000Z',
+const mockAIResponse = {
+  tricks: [
+    {
+      nameHe: 'מסלול פיתיון',
+      nameEn: 'Enticement Track',
+      descriptionHe: 'תיאור בעברית',
+      descriptionEn: 'Description in English',
+      applicability: 'high',
+      riskLevel: 'medium',
+      potentialSavings: 22000,
+    },
+  ],
+  negotiationScript: 'שלום, שמי [שם]. אני מעוניין/ת במשכנתא...',
+  insights: [
+    {
+      titleHe: 'ניתוח ריבית',
+      titleEn: 'Rate Analysis',
+      bodyHe: 'גוף בעברית',
+      bodyEn: 'Body in English',
+      icon: 'trending-down',
+    },
+  ],
 };
 
-const mockCurrentRates = {
-  fixed: 4.65,
-  cpi: 3.15,
-  prime: 6.05,
-  variable: 4.95,
-};
+// ─── buildComparison ──────────────────────────────────────────────────────────
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+describe('buildComparison', () => {
+  it('should calculate rateDelta correctly', () => {
+    const comparison = buildComparison(mockOffer, mockPortfolio);
+    expect(comparison.rateDelta).toBeCloseTo(0.45, 2);
+  });
 
-describe('reportService', () => {
+  it('should calculate monthlySaving as a number', () => {
+    const comparison = buildComparison(mockOffer, mockPortfolio);
+    expect(typeof comparison.monthlySaving).toBe('number');
+    expect(comparison.monthlySaving).toBeGreaterThan(0);
+  });
+
+  it('should calculate totalSaving as a number', () => {
+    const comparison = buildComparison(mockOffer, mockPortfolio);
+    expect(typeof comparison.totalSaving).toBe('number');
+    expect(comparison.totalSaving).toBeGreaterThan(0);
+  });
+
+  it('should return null rateDelta when portfolio is null', () => {
+    const comparison = buildComparison(mockOffer, null);
+    expect(comparison.rateDelta).toBeNull();
+    expect(comparison.monthlySaving).toBeNull();
+    expect(comparison.totalSaving).toBeNull();
+  });
+
+  it('should include loanAmount and termYears from offer', () => {
+    const comparison = buildComparison(mockOffer, mockPortfolio);
+    expect(comparison.loanAmount).toBe(1500000);
+    expect(comparison.termYears).toBe(25);
+  });
+
+  it('should build trackComparison array', () => {
+    const comparison = buildComparison(mockOffer, mockPortfolio);
+    expect(Array.isArray(comparison.trackComparison)).toBe(true);
+    expect(comparison.trackComparison).toHaveLength(1);
+    expect(comparison.trackComparison[0]).toHaveProperty('bankRate');
+    expect(comparison.trackComparison[0]).toHaveProperty('portfolioRate');
+  });
+});
+
+// ─── sanitizeTrick ────────────────────────────────────────────────────────────
+
+describe('sanitizeTrick', () => {
+  it('should return a valid trick object', () => {
+    const trick = sanitizeTrick(mockAIResponse.tricks[0]);
+    expect(trick).toMatchObject({
+      nameHe: 'מסלול פיתיון',
+      nameEn: 'Enticement Track',
+      applicability: 'high',
+      riskLevel: 'medium',
+      potentialSavings: 22000,
+    });
+  });
+
+  it('should return null for invalid input', () => {
+    expect(sanitizeTrick(null)).toBeNull();
+    expect(sanitizeTrick('string')).toBeNull();
+    expect(sanitizeTrick(42)).toBeNull();
+  });
+
+  it('should default applicability to medium for invalid values', () => {
+    const trick = sanitizeTrick({ ...mockAIResponse.tricks[0], applicability: 'invalid' });
+    expect(trick.applicability).toBe('medium');
+  });
+
+  it('should default riskLevel to medium for invalid values', () => {
+    const trick = sanitizeTrick({ ...mockAIResponse.tricks[0], riskLevel: 'extreme' });
+    expect(trick.riskLevel).toBe('medium');
+  });
+
+  it('should truncate long strings', () => {
+    const longString = 'a'.repeat(300);
+    const trick = sanitizeTrick({ ...mockAIResponse.tricks[0], nameHe: longString });
+    expect(trick.nameHe.length).toBeLessThanOrEqual(200);
+  });
+
+  it('should set potentialSavings to null for negative values', () => {
+    const trick = sanitizeTrick({ ...mockAIResponse.tricks[0], potentialSavings: -100 });
+    expect(trick.potentialSavings).toBeNull();
+  });
+});
+
+// ─── sanitizeInsight ──────────────────────────────────────────────────────────
+
+describe('sanitizeInsight', () => {
+  it('should return a valid insight object', () => {
+    const insight = sanitizeInsight(mockAIResponse.insights[0]);
+    expect(insight).toMatchObject({
+      titleHe: 'ניתוח ריבית',
+      titleEn: 'Rate Analysis',
+      icon: 'trending-down',
+    });
+  });
+
+  it('should return null for invalid input', () => {
+    expect(sanitizeInsight(null)).toBeNull();
+    expect(sanitizeInsight(undefined)).toBeNull();
+  });
+
+  it('should default icon to info for invalid icon values', () => {
+    const insight = sanitizeInsight({ ...mockAIResponse.insights[0], icon: 'invalid-icon' });
+    expect(insight.icon).toBe('info');
+  });
+
+  it('should accept all valid icon values', () => {
+    const validIcons = ['trending-down', 'check-circle', 'target', 'calendar', 'shield', 'info'];
+    validIcons.forEach((icon) => {
+      const insight = sanitizeInsight({ ...mockAIResponse.insights[0], icon });
+      expect(insight.icon).toBe(icon);
+    });
+  });
+});
+
+// ─── generateFallbackReport ───────────────────────────────────────────────────
+
+describe('generateFallbackReport', () => {
+  it('should return a complete report object', () => {
+    const comparison = buildComparison(mockOffer, mockPortfolio);
+    const report = generateFallbackReport(mockOffer, mockPortfolio, comparison);
+
+    expect(report).toHaveProperty('tricks');
+    expect(report).toHaveProperty('negotiationScript');
+    expect(report).toHaveProperty('insights');
+    expect(report).toHaveProperty('comparison');
+    expect(report).toHaveProperty('generatedAt');
+    expect(report).toHaveProperty('generatedBy', 'rule-based-fallback');
+    expect(report).toHaveProperty('processingTimeMs');
+  });
+
+  it('should include at least 3 tricks', () => {
+    const comparison = buildComparison(mockOffer, mockPortfolio);
+    const report = generateFallbackReport(mockOffer, mockPortfolio, comparison);
+    expect(report.tricks.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('should include the Enticement Track trick', () => {
+    const comparison = buildComparison(mockOffer, mockPortfolio);
+    const report = generateFallbackReport(mockOffer, mockPortfolio, comparison);
+    const enticementTrick = report.tricks.find((t) => t.nameEn === 'Enticement Track');
+    expect(enticementTrick).toBeDefined();
+  });
+
+  it('should include a non-empty negotiation script', () => {
+    const comparison = buildComparison(mockOffer, mockPortfolio);
+    const report = generateFallbackReport(mockOffer, mockPortfolio, comparison);
+    expect(report.negotiationScript.length).toBeGreaterThan(50);
+  });
+
+  it('should include at least 3 insights', () => {
+    const comparison = buildComparison(mockOffer, mockPortfolio);
+    const report = generateFallbackReport(mockOffer, mockPortfolio, comparison);
+    expect(report.insights.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// ─── generateEnhancedReport ───────────────────────────────────────────────────
+
+describe('generateEnhancedReport', () => {
   beforeEach(() => {
+    updateEnhancedAnalysis.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
     jest.clearAllMocks();
   });
 
-  // ── calculateWeightedRate ─────────────────────────────────────────────────
+  it('should return AI-generated report when AI succeeds', async () => {
+    callGPT.mockResolvedValue(mockAIResponse);
+    process.env.OPENAI_API_KEY = 'test-key';
 
-  describe('calculateWeightedRate', () => {
-    it('should calculate weighted average rate correctly', () => {
-      const tracks = [
-        { type: 'fixed', percentage: 40, rate: 4.7 },
-        { type: 'prime', percentage: 30, rate: 5.9 },
-        { type: 'cpi', percentage: 30, rate: 3.2 },
-      ];
+    const report = await generateEnhancedReport(
+      'offer123',
+      'user456',
+      mockOffer,
+      mockPortfolio
+    );
 
-      const result = reportService.calculateWeightedRate(tracks);
-      // (4.7 * 0.4 + 5.9 * 0.3 + 3.2 * 0.3) = 1.88 + 1.77 + 0.96 = 4.61
-      expect(result).toBeCloseTo(4.61, 1);
-    });
-
-    it('should return null for empty tracks', () => {
-      expect(reportService.calculateWeightedRate([])).toBeNull();
-      expect(reportService.calculateWeightedRate(null)).toBeNull();
-    });
-
-    it('should handle tracks with null rates', () => {
-      const tracks = [
-        { type: 'fixed', percentage: 50, rate: 4.0 },
-        { type: 'prime', percentage: 50, rate: null },
-      ];
-      const result = reportService.calculateWeightedRate(tracks);
-      expect(result).toBe(4.0);
-    });
+    expect(report.generatedBy).toBe('ai');
+    expect(report.tricks).toHaveLength(1);
+    expect(report.negotiationScript).toBe('שלום, שמי [שם]. אני מעוניין/ת במשכנתא...');
+    expect(updateEnhancedAnalysis).toHaveBeenCalledWith('offer123', expect.any(Object));
   });
 
-  // ── calculatePMT ──────────────────────────────────────────────────────────
+  it('should fall back to rule-based report when AI fails', async () => {
+    callGPT.mockRejectedValue(new Error('OpenAI API error'));
+    process.env.OPENAI_API_KEY = 'test-key';
 
-  describe('calculatePMT', () => {
-    it('should calculate monthly payment correctly', () => {
-      // ₪1,000,000 at 5% for 30 years
-      const monthly = reportService.calculatePMT(1000000, 0.05 / 12, 360);
-      expect(monthly).toBeCloseTo(5368.22, 0);
-    });
+    const report = await generateEnhancedReport(
+      'offer123',
+      'user456',
+      mockOffer,
+      mockPortfolio
+    );
 
-    it('should handle zero interest rate', () => {
-      const monthly = reportService.calculatePMT(1200000, 0, 360);
-      expect(monthly).toBeCloseTo(3333.33, 0);
-    });
-
-    it('should return 0 for zero principal', () => {
-      expect(reportService.calculatePMT(0, 0.05 / 12, 360)).toBe(0);
-    });
-
-    it('should return 0 for zero months', () => {
-      expect(reportService.calculatePMT(1000000, 0.05 / 12, 0)).toBe(0);
-    });
+    expect(report.generatedBy).toBe('rule-based-fallback');
+    expect(report.tricks.length).toBeGreaterThan(0);
+    expect(updateEnhancedAnalysis).toHaveBeenCalled();
   });
 
-  // ── estimateSavings ───────────────────────────────────────────────────────
+  it('should fall back to rule-based report when OPENAI_API_KEY is not set', async () => {
+    delete process.env.OPENAI_API_KEY;
 
-  describe('estimateSavings', () => {
-    it('should estimate savings when bank rate is higher', () => {
-      const result = reportService.estimateSavings(1200000, 5.2, 4.5, 25);
-      expect(result.monthly).toBeGreaterThan(0);
-      expect(result.total).toBeGreaterThan(0);
-      expect(result.interest).toBeGreaterThan(0);
-    });
+    const report = await generateEnhancedReport(
+      'offer123',
+      'user456',
+      mockOffer,
+      mockPortfolio
+    );
 
-    it('should return zero savings when bank rate is lower', () => {
-      const result = reportService.estimateSavings(1200000, 4.0, 4.5, 25);
-      expect(result.monthly).toBe(0);
-      expect(result.total).toBe(0);
-    });
-
-    it('should return nulls when data is missing', () => {
-      const result = reportService.estimateSavings(1200000, null, 4.5, 25);
-      expect(result.monthly).toBeNull();
-      expect(result.total).toBeNull();
-      expect(result.interest).toBeNull();
-    });
-
-    it('should return nulls when loan amount is zero', () => {
-      const result = reportService.estimateSavings(0, 5.0, 4.5, 25);
-      expect(result.monthly).toBeNull();
-    });
+    expect(report.generatedBy).toBe('rule-based-fallback');
+    expect(callGPT).not.toHaveBeenCalled();
   });
 
-  // ── buildComparison ───────────────────────────────────────────────────────
+  it('should still return report even if storing to Firestore fails', async () => {
+    callGPT.mockResolvedValue(mockAIResponse);
+    process.env.OPENAI_API_KEY = 'test-key';
+    updateEnhancedAnalysis.mockRejectedValue(new Error('Firestore write failed'));
 
-  describe('buildComparison', () => {
-    it('should build a complete comparison object', () => {
-      const comparison = reportService.buildComparison(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        mockCurrentRates
-      );
+    const report = await generateEnhancedReport(
+      'offer123',
+      'user456',
+      mockOffer,
+      mockPortfolio
+    );
 
-      expect(comparison).toHaveProperty('bankOffer');
-      expect(comparison).toHaveProperty('optimizedModel');
-      expect(comparison).toHaveProperty('rateDifference');
-      expect(comparison).toHaveProperty('potentialMonthlySavings');
-      expect(comparison).toHaveProperty('potentialTotalSavings');
-      expect(comparison).toHaveProperty('trackComparisons');
-      expect(comparison).toHaveProperty('boiAverages');
-      expect(comparison).toHaveProperty('verdict');
-
-      expect(comparison.bankOffer.bank).toBe('בנק לאומי');
-      expect(comparison.bankOffer.rate).toBe(5.2);
-      expect(comparison.optimizedModel.name).toBe('Market Standard');
-      expect(comparison.trackComparisons).toHaveLength(3);
-    });
-
-    it('should calculate positive rate difference when bank is more expensive', () => {
-      const comparison = reportService.buildComparison(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        mockCurrentRates
-      );
-
-      // Bank rate (5.2) should be higher than portfolio weighted rate
-      expect(comparison.rateDifference).toBeGreaterThan(0);
-    });
-
-    it('should set verdict based on rate difference', () => {
-      const comparison = reportService.buildComparison(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        mockCurrentRates
-      );
-
-      expect(['significantly_worse', 'slightly_worse', 'comparable', 'better_than_model'])
-        .toContain(comparison.verdict);
-    });
-
-    it('should handle missing OCR data gracefully', () => {
-      const offerWithMissingData = {
-        ...mockAnalyzedOffer,
-        extractedData: { bank: '', amount: null, rate: null, term: null },
-      };
-
-      const comparison = reportService.buildComparison(
-        offerWithMissingData,
-        mockPortfolio,
-        mockCurrentRates
-      );
-
-      expect(comparison.rateDifference).toBeNull();
-      expect(comparison.verdict).toBe('insufficient_data');
-    });
+    expect(report).toBeDefined();
+    expect(report.tricks).toBeDefined();
   });
 
-  // ── buildTrackComparisons ─────────────────────────────────────────────────
+  it('should include processingTimeMs in the report', async () => {
+    callGPT.mockResolvedValue(mockAIResponse);
+    process.env.OPENAI_API_KEY = 'test-key';
 
-  describe('buildTrackComparisons', () => {
-    it('should build comparisons for each portfolio track', () => {
-      const comparisons = reportService.buildTrackComparisons(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        mockCurrentRates
-      );
+    const report = await generateEnhancedReport(
+      'offer123',
+      'user456',
+      mockOffer,
+      mockPortfolio
+    );
 
-      expect(comparisons).toHaveLength(3);
-      expect(comparisons[0].trackType).toBe('fixed');
-      expect(comparisons[1].trackType).toBe('prime');
-      expect(comparisons[2].trackType).toBe('cpi');
-    });
-
-    it('should include BOI comparison for each track', () => {
-      const comparisons = reportService.buildTrackComparisons(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        mockCurrentRates
-      );
-
-      for (const comp of comparisons) {
-        expect(comp).toHaveProperty('boiAverage');
-        expect(comp).toHaveProperty('vsBoi');
-        expect(comp).toHaveProperty('vsBoiLabel');
-      }
-    });
-
-    it('should include bank offer comparison when rate is available', () => {
-      const comparisons = reportService.buildTrackComparisons(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        mockCurrentRates
-      );
-
-      for (const comp of comparisons) {
-        expect(comp).toHaveProperty('bankOfferRate', 5.2);
-        expect(comp).toHaveProperty('vsBank');
-        expect(comp).toHaveProperty('vsBankLabel');
-      }
-    });
+    expect(typeof report.processingTimeMs).toBe('number');
+    expect(report.processingTimeMs).toBeGreaterThanOrEqual(0);
   });
 
-  // ── validatePortfolio ─────────────────────────────────────────────────────
+  it('should work with null portfolio', async () => {
+    callGPT.mockResolvedValue(mockAIResponse);
+    process.env.OPENAI_API_KEY = 'test-key';
 
-  describe('validatePortfolio', () => {
-    it('should accept a valid portfolio', () => {
-      expect(() => reportService.validatePortfolio(mockPortfolio)).not.toThrow();
-    });
+    const report = await generateEnhancedReport(
+      'offer123',
+      'user456',
+      mockOffer,
+      null
+    );
 
-    it('should reject null portfolio', () => {
-      expect(() => reportService.validatePortfolio(null)).toThrow('Portfolio data is required');
-    });
-
-    it('should reject portfolio without id', () => {
-      const invalid = { ...mockPortfolio, id: '' };
-      expect(() => reportService.validatePortfolio(invalid)).toThrow('valid id');
-    });
-
-    it('should reject portfolio without tracks', () => {
-      const invalid = { ...mockPortfolio, tracks: [] };
-      expect(() => reportService.validatePortfolio(invalid)).toThrow('at least one track');
-    });
-
-    it('should reject portfolio with invalid termYears', () => {
-      const invalid = { ...mockPortfolio, termYears: 0 };
-      expect(() => reportService.validatePortfolio(invalid)).toThrow('valid termYears');
-    });
-
-    it('should reject portfolio with invalid monthlyRepayment', () => {
-      const invalid = { ...mockPortfolio, monthlyRepayment: -100 };
-      expect(() => reportService.validatePortfolio(invalid)).toThrow('valid monthlyRepayment');
-    });
-
-    it('should reject portfolio with invalid totalCost', () => {
-      const invalid = { ...mockPortfolio, totalCost: 0 };
-      expect(() => reportService.validatePortfolio(invalid)).toThrow('valid totalCost');
-    });
-
-    it('should reject portfolio with invalid track percentage', () => {
-      const invalid = {
-        ...mockPortfolio,
-        tracks: [{ type: 'fixed', percentage: 0, rate: 4.5 }],
-      };
-      expect(() => reportService.validatePortfolio(invalid)).toThrow('valid percentage');
-    });
-
-    it('should reject portfolio with track percentages not summing to 100', () => {
-      const invalid = {
-        ...mockPortfolio,
-        tracks: [
-          { type: 'fixed', percentage: 30, rate: 4.5 },
-          { type: 'prime', percentage: 30, rate: 5.9 },
-        ],
-      };
-      expect(() => reportService.validatePortfolio(invalid)).toThrow('sum to 100%');
-    });
-  });
-
-  // ── sanitizeTrick ─────────────────────────────────────────────────────────
-
-  describe('sanitizeTrick', () => {
-    it('should sanitize a well-formed trick', () => {
-      const trick = {
-        nameHe: 'מסלול פיתיון',
-        nameEn: 'Enticement Track',
-        descriptionHe: 'תיאור בעברית',
-        descriptionEn: 'English description',
-        potentialSavings: 15000,
-        riskLevel: 'medium',
-        applicability: 'high',
-      };
-
-      const result = reportService.sanitizeTrick(trick);
-      expect(result).toEqual(trick);
-    });
-
-    it('should handle missing fields with defaults', () => {
-      const result = reportService.sanitizeTrick({});
-      expect(result.nameHe).toBe('');
-      expect(result.nameEn).toBe('');
-      expect(result.potentialSavings).toBeNull();
-      expect(result.riskLevel).toBe('medium');
-      expect(result.applicability).toBe('medium');
-    });
-
-    it('should reject invalid riskLevel values', () => {
-      const result = reportService.sanitizeTrick({ riskLevel: 'extreme' });
-      expect(result.riskLevel).toBe('medium');
-    });
-  });
-
-  // ── sanitizeInsight ───────────────────────────────────────────────────────
-
-  describe('sanitizeInsight', () => {
-    it('should sanitize a well-formed insight', () => {
-      const insight = {
-        titleHe: 'כותרת',
-        titleEn: 'Title',
-        bodyHe: 'גוף',
-        bodyEn: 'Body',
-        icon: 'shield',
-      };
-
-      const result = reportService.sanitizeInsight(insight);
-      expect(result).toEqual(insight);
-    });
-
-    it('should handle missing fields with defaults', () => {
-      const result = reportService.sanitizeInsight({});
-      expect(result.titleHe).toBe('');
-      expect(result.icon).toBe('info');
-    });
-  });
-
-  // ── generateRuleBasedReport ───────────────────────────────────────────────
-
-  describe('generateRuleBasedReport', () => {
-    it('should generate a complete rule-based report', () => {
-      const comparison = reportService.buildComparison(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        mockCurrentRates
-      );
-
-      const report = reportService.generateRuleBasedReport(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        comparison,
-        mockCurrentRates
-      );
-
-      expect(report).toHaveProperty('tricks');
-      expect(report).toHaveProperty('negotiationScript');
-      expect(report).toHaveProperty('insights');
-      expect(report).toHaveProperty('summary');
-      expect(report).toHaveProperty('summaryHe');
-    });
-
-    it('should always include the Enticement Track trick', () => {
-      const comparison = reportService.buildComparison(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        mockCurrentRates
-      );
-
-      const report = reportService.generateRuleBasedReport(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        comparison,
-        mockCurrentRates
-      );
-
-      const enticementTrick = report.tricks.find((t) => t.nameEn === 'Enticement Track');
-      expect(enticementTrick).toBeDefined();
-      expect(enticementTrick.nameHe).toBe('מסלול פיתיון');
-    });
-
-    it('should generate a Hebrew negotiation script', () => {
-      const comparison = reportService.buildComparison(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        mockCurrentRates
-      );
-
-      const report = reportService.generateRuleBasedReport(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        comparison,
-        mockCurrentRates
-      );
-
-      expect(report.negotiationScript).toContain('שלום');
-      expect(report.negotiationScript).toContain('בנק לאומי');
-      expect(report.negotiationScript).toContain('בנק ישראל');
-    });
-
-    it('should include BOI rate matching trick when bank rate is higher', () => {
-      const comparison = reportService.buildComparison(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        mockCurrentRates
-      );
-
-      const report = reportService.generateRuleBasedReport(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        comparison,
-        mockCurrentRates
-      );
-
-      const boiTrick = report.tricks.find((t) => t.nameEn === 'BOI Rate Matching');
-      expect(boiTrick).toBeDefined();
-    });
-
-    it('should generate insights with Hebrew and English content', () => {
-      const comparison = reportService.buildComparison(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        mockCurrentRates
-      );
-
-      const report = reportService.generateRuleBasedReport(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        comparison,
-        mockCurrentRates
-      );
-
-      expect(report.insights.length).toBeGreaterThanOrEqual(2);
-      for (const insight of report.insights) {
-        expect(insight).toHaveProperty('titleHe');
-        expect(insight).toHaveProperty('titleEn');
-        expect(insight).toHaveProperty('bodyHe');
-        expect(insight).toHaveProperty('bodyEn');
-        expect(insight).toHaveProperty('icon');
-      }
-    });
-
-    it('should limit tricks to 4', () => {
-      const comparison = reportService.buildComparison(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        mockCurrentRates
-      );
-
-      const report = reportService.generateRuleBasedReport(
-        mockAnalyzedOffer,
-        mockPortfolio,
-        comparison,
-        mockCurrentRates
-      );
-
-      expect(report.tricks.length).toBeLessThanOrEqual(4);
-    });
-  });
-
-  // ── generateEnhancedReport (integration) ──────────────────────────────────
-
-  describe('generateEnhancedReport', () => {
-    it('should throw 404 when offer is not found', async () => {
-      offerService.findByIdAndUserId.mockResolvedValue(null);
-
-      await expect(
-        reportService.generateEnhancedReport('offer-123', 'user-456', mockPortfolio)
-      ).rejects.toThrow('Offer not found or access denied');
-    });
-
-    it('should throw 400 when offer is not analyzed', async () => {
-      offerService.findByIdAndUserId.mockResolvedValue({
-        ...mockAnalyzedOffer,
-        status: 'pending',
-      });
-
-      await expect(
-        reportService.generateEnhancedReport('offer-123', 'user-456', mockPortfolio)
-      ).rejects.toThrow('must be analyzed via OCR');
-    });
-
-    it('should throw 400 for invalid portfolio', async () => {
-      offerService.findByIdAndUserId.mockResolvedValue(mockAnalyzedOffer);
-
-      await expect(
-        reportService.generateEnhancedReport('offer-123', 'user-456', null)
-      ).rejects.toThrow('Portfolio data is required');
-    });
-
-    it('should generate a complete report with rule-based fallback', async () => {
-      offerService.findByIdAndUserId.mockResolvedValue(mockAnalyzedOffer);
-      ratesService.getCurrentAverages.mockResolvedValue(mockCurrentRates);
-
-      // OpenAI is not configured in tests, so it will fall back to rule-based
-      const report = await reportService.generateEnhancedReport(
-        'offer-123',
-        'user-456',
-        mockPortfolio
-      );
-
-      expect(report).toHaveProperty('offerId', 'offer-123');
-      expect(report).toHaveProperty('portfolioId', 'market_standard');
-      expect(report).toHaveProperty('comparison');
-      expect(report).toHaveProperty('tricks');
-      expect(report).toHaveProperty('negotiationScript');
-      expect(report).toHaveProperty('insights');
-      expect(report).toHaveProperty('summary');
-      expect(report).toHaveProperty('summaryHe');
-      expect(report).toHaveProperty('generatedAt');
-      expect(report).toHaveProperty('processingTimeMs');
-
-      // Verify the report was stored
-      expect(offerService.updateOffer).toHaveBeenCalledWith(
-        'offer-123',
-        expect.objectContaining({
-          'analysis.enhanced': expect.any(Object),
-          portfolioId: 'market_standard',
-        })
-      );
-    });
-
-    it('should still return report even if storage fails', async () => {
-      offerService.findByIdAndUserId.mockResolvedValue(mockAnalyzedOffer);
-      offerService.updateOffer.mockRejectedValue(new Error('Firestore write failed'));
-      ratesService.getCurrentAverages.mockResolvedValue(mockCurrentRates);
-
-      const report = await reportService.generateEnhancedReport(
-        'offer-123',
-        'user-456',
-        mockPortfolio
-      );
-
-      // Report should still be returned despite storage failure
-      expect(report).toHaveProperty('offerId', 'offer-123');
-      expect(report).toHaveProperty('tricks');
-    });
+    expect(report).toBeDefined();
   });
 });

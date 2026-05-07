@@ -1,14 +1,20 @@
+'use strict';
+
+const { getFirestore } = require('./firebase');
+const logger = require('../utils/logger');
+
+let db;
+
 /**
- * Database configuration – Firestore migration shim.
- *
- * This file previously contained the Mongoose/MongoDB connection.
- * It now re-exports the Firestore `db` instance from `firestore.js`
- * so that any code still importing `db.js` continues to work without
- * modification during the incremental migration.
- *
- * New code should import directly from `./firestore`.
+ * Get the Firestore database instance (singleton).
+ * @returns {FirebaseFirestore.Firestore}
  */
+function getDb() {
+  if (!db) {
+    db = getFirestore();
+    logger.info('Firestore connection established');
+  }
+  return db;
+}
 
-const db = require('./firestore');
-
-module.exports = db;
+module.exports = { getDb };

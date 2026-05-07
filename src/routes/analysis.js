@@ -1,37 +1,35 @@
-/**
- * Analysis routes
- *
- * GET  /api/v1/analysis/:id                  – get analysis results for an offer
- * POST /api/v1/analysis/enhanced/:offerId     – generate enhanced report (paid)
- */
+'use strict';
+
 const express = require('express');
-const router = express.Router();
-const analysisController = require('../controllers/analysisController');
 const { protect } = require('../middleware/auth');
-const { requirePaidAccess } = require('../middleware/paidAccess');
-const { validate } = require('../middleware/validate');
-const { enhancedAnalysisSchema } = require('../validators/analysisValidator');
+const { paidAccess } = require('../middleware/paidAccess');
+const { paidEndpointLimiter } = require('../middleware/rateLimit');
+const { validateOfferId } = require('../validators/analysisValidator');
+const { generateEnhancedReport } = require('../controllers/analysisController');
 
-// All analysis routes require authentication
-router.use(protect);
-
-/**
- * @route  GET /api/v1/analysis/:id
- * @desc   Get AI analysis results for a specific offer
- * @access Private
- */
-router.get('/:id', analysisController.getAnalysis);
+const router = express.Router();
 
 /**
- * @route  POST /api/v1/analysis/enhanced/:offerId
- * @desc   Generate enhanced analysis report comparing real offer to optimized model
- * @access Private + Paid
+ * POST /api/v1/analysis/:offerId/enhanced
+ *
+ * Generate an AI-powered enhanced mortgage analysis report.
+ *
+ * Middleware chain:
+ *   1. protect          — Verify Firebase ID token, attach req.user
+ *   2. paidAccess       — Ensure req.user.paidAnalyses === true
+ *   3. paidEndpointLimiter — Rate limit: 5 req/min per user
+ *   4. validateOfferId  — Validate :offerId param format
+ *   5. generateEnhancedReport — Controller
+ *
+ * @returns {object} { success: true, data: enhancedReport }
  */
 router.post(
-  '/enhanced/:offerId',
-  requirePaidAccess,
-  validate(enhancedAnalysisSchema),
-  analysisController.getEnhancedAnalysis
+  '/:offerId/enhanced',
+  protect,
+  paidAccess,
+  paidEndpointLimiter,
+  validateOfferId,
+  generateEnhancedReport
 );
 
 module.exports = router;
