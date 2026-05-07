@@ -35,7 +35,6 @@ const app = express();
 app.set('trust proxy', 1);
 
 
-app.use('/api/v1/wizard', wizardPrivateRoutes);
 // Security & utility middleware (order matters)
 app.use(helmetMiddleware);
 app.use(corsMiddleware);
@@ -43,6 +42,7 @@ app.options('*', corsMiddleware);
 app.use(apiLimiter);
 app.use(morgan('combined', { stream: { write: (msg) => logger.info(msg.trim()) } }));
 
+app.use('/api/v1/wizard', wizardPrivateRoutes);
 // ── Stripe Webhook Route (MUST be before express.json()) ─────────────────────
 // Stripe webhook signature verification requires the raw request body.
 // We mount the webhook endpoint with express.raw() BEFORE the global

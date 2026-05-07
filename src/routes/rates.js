@@ -36,6 +36,8 @@ const ratesLimiter = rateLimit({
  * @desc   Get latest Bank of Israel average mortgage rates
  * @access Public (no auth required)
  */
-router.get('/latest', ratesLimiter, ratesController.getLatestRates);
+const { getLatestRates } = require('../controllers/ratesController');
+
+router.get('/latest', ratesLimiter, getLatestRates);
 
 module.exports = router;
