@@ -1,152 +1,68 @@
-/**
- * Analysis Controller
- *
- * Handles analysis-related endpoints:
- *   GET  /api/v1/analysis/:id                  – get full offer analysis
- *   POST /api/v1/analysis/enhanced/:offerId     – generate enhanced report (paid)
- *
- * The enhanced analysis compares a user's real bank offer (OCR-extracted)
- * against their selected optimized portfolio model, generating:
- *   - Track-by-track comparison
- *   - Mortgage tricks and strategies
- *   - Personalized Hebrew negotiation script
- *   - Strategic insights
- */
-
 'use strict';
 
 const offerService = require('../services/offerService');
+const portfolioService = require('../services/portfolioService');
 const reportService = require('../services/reportService');
+const { sendSuccess } = require('../utils/response');
 const logger = require('../utils/logger');
 
 /**
- * GET /api/v1/analysis/:id
+ * POST /api/v1/analysis/:offerId/enhanced
  *
- * Fetches the full offer document (including analysis sub-object) from
- * Firestore and returns it. Ownership is enforced via findByIdAndUserId.
+ * Generate (or retrieve cached) enhanced AI analysis report for a paid user.
  *
- * @param {import('express').Request}  req
+ * Middleware chain: protect → paidAccess → paidEndpointLimiter → validateOfferId
+ *
+ * Flow:
+ * 1. Validate ownership: offerService.findByIdAndUserId(offerId, userId)
+ * 2. If enhanced report already exists, return it immediately (idempotent).
+ * 3. Fetch user portfolio: portfolioService.getUserPortfolio(userId)
+ * 4. Generate report: reportService.generateEnhancedReport(offerId, userId, offer, portfolio)
+ * 5. Respond with { success: true, data: enhancedReport }
+ *
+ * @param {import('express').Request} req
  * @param {import('express').Response} res
+ * @param {import('express').NextFunction} next
  */
-exports.getAnalysis = async (req, res) => {
+async function generateEnhancedReport(req, res, next) {
   try {
-    const userId  = req.user.id;
-    const offerId = req.params.id;
+    const { offerId } = req.params;
+    const userId = req.user.uid;
 
-    if (!offerId) {
-      return res.status(400).json({ success: false, message: 'Offer ID is required' });
-    }
+    logger.info('Enhanced report requested', { offerId, userId });
 
-    // Fetch offer and enforce ownership in a single call
+    // 1. Verify offer exists and belongs to the user
     const offer = await offerService.findByIdAndUserId(offerId, userId);
-    if (!offer) {
-      return res.status(404).json({ success: false, message: 'Offer not found' });
+
+    // 2. Return cached report if it already exists (idempotent)
+    if (offer.analysis && offer.analysis.enhanced) {
+      logger.info('Returning cached enhanced report', { offerId, userId });
+      return sendSuccess(res, offer.analysis.enhanced, 200, 'Enhanced report retrieved from cache');
     }
 
-    // Return the full OfferShape so the frontend can render all fields
-    return res.status(200).json({
-      success: true,
-      data: offer,
-    });
-  } catch (err) {
-    logger.error(`analysisController.getAnalysis error: ${err.message}`);
-    return res.status(500).json({ success: false, message: 'Server error' });
-  }
-};
+    // 3. Fetch user's latest portfolio
+    const portfolio = await portfolioService.getUserPortfolio(userId);
 
-/**
- * POST /api/v1/analysis/enhanced/:offerId
- *
- * Generates an enhanced analysis report comparing the user's real bank
- * offer (OCR-extracted) to their selected optimized portfolio model.
- *
- * Requires:
- *   - Authentication (protect middleware)
- *   - Paid access (requirePaidAccess middleware)
- *   - The offer must be in 'analyzed' status (OCR completed)
- *
- * Request body:
- *   {
- *     portfolioId: string,           // Portfolio scenario type
- *     portfolio: {                    // Full portfolio object
- *       id: string,
- *       name: string,
- *       nameHe: string,
- *       termYears: number,
- *       tracks: Array<{ type, percentage, rate, rateDisplay, amount }>,
- *       monthlyRepayment: number,
- *       totalCost: number,
- *       totalInterest: number
- *     }
- *   }
- *
- * Response:
- *   {
- *     success: true,
- *     data: {
- *       offerId: string,
- *       portfolioId: string,
- *       portfolioName: string,
- *       portfolioNameHe: string,
- *       generatedAt: ISO string,
- *       processingTimeMs: number,
- *       comparison: { ... },
- *       tricks: Array<{ nameHe, nameEn, descriptionHe, descriptionEn, potentialSavings, riskLevel, applicability }>,
- *       negotiationScript: string (Hebrew),
- *       insights: Array<{ titleHe, titleEn, bodyHe, bodyEn, icon }>,
- *       summary: string,
- *       summaryHe: string
- *     }
- *   }
- *
- * @param {import('express').Request}  req
- * @param {import('express').Response} res
- */
-exports.getEnhancedAnalysis = async (req, res) => {
-  try {
-    const userId  = req.user.id;
-    const offerId = req.params.offerId;
-
-    if (!offerId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Offer ID is required',
-      });
-    }
-
-    const { portfolio } = req.body;
-
-    if (!portfolio) {
-      return res.status(400).json({
-        success: false,
-        message: 'Portfolio data is required in the request body',
-      });
-    }
-
-    // Generate the enhanced report
-    const report = await reportService.generateEnhancedReport(
+    // 4. Generate the enhanced report (AI + fallback)
+    const enhancedReport = await reportService.generateEnhancedReport(
       offerId,
       userId,
+      offer,
       portfolio
     );
 
-    return res.status(200).json({
-      success: true,
-      data: report,
+    // 5. Respond with the report
+    logger.info('Enhanced report generated and returned', {
+      offerId,
+      userId,
+      generatedBy: enhancedReport.generatedBy,
+      processingTimeMs: enhancedReport.processingTimeMs,
     });
-  } catch (err) {
-    // Handle known error types with appropriate status codes
-    if (err.statusCode) {
-      return res.status(err.statusCode).json({
-        success: false,
-        message: err.message,
-      });
-    }
 
-    logger.error(`analysisController.getEnhancedAnalysis error: ${err.message}`);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to generate enhanced analysis report',
-    });
+    return sendSuccess(res, enhancedReport, 201, 'Enhanced report generated successfully');
+  } catch (error) {
+    next(error);
   }
-};
+}
+
+module.exports = { generateEnhancedReport };

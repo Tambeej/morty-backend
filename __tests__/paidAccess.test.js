@@ -1,124 +1,65 @@
-/**
- * Paid Access Middleware Tests
- *
- * Tests for the requirePaidAccess middleware that checks
- * whether a user has paid for enhanced analysis features.
- */
-
 'use strict';
 
-jest.mock('../src/config/firestore', () => {
-  const mockDoc = {
-    get: jest.fn(),
-  };
-  const mockCollection = jest.fn(() => ({
-    doc: jest.fn(() => mockDoc),
-  }));
-  const mock = {
-    collection: mockCollection,
-    _mockDoc: mockDoc,
-  };
-  return mock;
-});
+/**
+ * Unit tests for the paidAccess middleware.
+ */
 
-jest.mock('../src/utils/logger', () => ({
-  info: jest.fn(),
-  warn: jest.fn(),
-  error: jest.fn(),
-  debug: jest.fn(),
-}));
+const { paidAccess } = require('../src/middleware/paidAccess');
+const { ForbiddenError } = require('../src/utils/errors');
 
-const httpMocks = require('node-mocks-http');
-const { requirePaidAccess } = require('../src/middleware/paidAccess');
-const db = require('../src/config/firestore');
-
-describe('requirePaidAccess middleware', () => {
-  let req;
-  let res;
-  let next;
+describe('paidAccess middleware', () => {
+  let req, res, next;
 
   beforeEach(() => {
-    jest.clearAllMocks();
-    req = httpMocks.createRequest();
-    res = httpMocks.createResponse();
-    // Attach json method that supertest/express would provide
-    res.json = jest.fn().mockReturnValue(res);
-    res.status = jest.fn().mockReturnValue(res);
+    req = {};
+    res = {};
     next = jest.fn();
   });
 
-  it('should return 401 when req.user is missing', async () => {
-    await requirePaidAccess(req, res, next);
-
-    expect(res.status).toHaveBeenCalledWith(401);
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({ success: false, message: 'Authentication required' })
-    );
-    expect(next).not.toHaveBeenCalled();
+  it('should call next() when user has paidAnalyses = true', () => {
+    req.user = { uid: 'user123', paidAnalyses: true };
+    paidAccess(req, res, next);
+    expect(next).toHaveBeenCalledWith();
+    expect(next).toHaveBeenCalledTimes(1);
   });
 
-  it('should return 401 when user document does not exist', async () => {
-    req.user = { id: 'user-123' };
-    db._mockDoc.get.mockResolvedValue({ exists: false });
-
-    await requirePaidAccess(req, res, next);
-
-    expect(res.status).toHaveBeenCalledWith(401);
-    expect(next).not.toHaveBeenCalled();
+  it('should call next(ForbiddenError) when user has paidAnalyses = false', () => {
+    req.user = { uid: 'user123', paidAnalyses: false };
+    paidAccess(req, res, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    const error = next.mock.calls[0][0];
+    expect(error).toBeInstanceOf(ForbiddenError);
+    expect(error.statusCode).toBe(403);
+    expect(error.code).toBe('FORBIDDEN');
   });
 
-  it('should return 403 when user has not paid', async () => {
-    req.user = { id: 'user-123' };
-    db._mockDoc.get.mockResolvedValue({
-      exists: true,
-      data: () => ({ paidAnalyses: false }),
-    });
-
-    await requirePaidAccess(req, res, next);
-
-    expect(res.status).toHaveBeenCalledWith(403);
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({
-        success: false,
-        errorCode: 'PAYMENT_REQUIRED',
-      })
-    );
-    expect(next).not.toHaveBeenCalled();
+  it('should call next(ForbiddenError) when user has no paidAnalyses field', () => {
+    req.user = { uid: 'user123', email: 'test@example.com' };
+    paidAccess(req, res, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    const error = next.mock.calls[0][0];
+    expect(error).toBeInstanceOf(ForbiddenError);
+    expect(error.statusCode).toBe(403);
   });
 
-  it('should return 403 when paidAnalyses is undefined', async () => {
-    req.user = { id: 'user-123' };
-    db._mockDoc.get.mockResolvedValue({
-      exists: true,
-      data: () => ({}),
-    });
-
-    await requirePaidAccess(req, res, next);
-
-    expect(res.status).toHaveBeenCalledWith(403);
-    expect(next).not.toHaveBeenCalled();
+  it('should call next(ForbiddenError) when user has paidAnalyses = null', () => {
+    req.user = { uid: 'user123', paidAnalyses: null };
+    paidAccess(req, res, next);
+    const error = next.mock.calls[0][0];
+    expect(error).toBeInstanceOf(ForbiddenError);
   });
 
-  it('should call next() when user has paid', async () => {
-    req.user = { id: 'user-123' };
-    db._mockDoc.get.mockResolvedValue({
-      exists: true,
-      data: () => ({ paidAnalyses: true }),
-    });
-
-    await requirePaidAccess(req, res, next);
-
-    expect(next).toHaveBeenCalled();
-    expect(res.status).not.toHaveBeenCalled();
+  it('should call next(ForbiddenError) when req.user is undefined', () => {
+    req.user = undefined;
+    paidAccess(req, res, next);
+    const error = next.mock.calls[0][0];
+    expect(error).toBeInstanceOf(ForbiddenError);
   });
 
-  it('should return 500 on Firestore error', async () => {
-    req.user = { id: 'user-123' };
-    db._mockDoc.get.mockRejectedValue(new Error('Firestore unavailable'));
-
-    await requirePaidAccess(req, res, next);
-
-    expect(res.status).toHaveBeenCalledWith(500);
-    expect(next).not.toHaveBeenCalled();
+  it('should include a descriptive error message', () => {
+    req.user = { uid: 'user123', paidAnalyses: false };
+    paidAccess(req, res, next);
+    const error = next.mock.calls[0][0];
+    expect(error.message).toContain('paid');
   });
 });
