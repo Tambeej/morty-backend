@@ -283,6 +283,16 @@ describe('POST /api/v1/analysis/:offerId/enhanced', () => {
       expect(res.body.success).toBe(false);
       expect(res.body.error.code).toBe('VALIDATION_ERROR');
     });
+
+    it('should return 400 when offerId is empty string', async () => {
+      const res = await request(app)
+        .post('/api/v1/analysis//enhanced')
+        .set('Authorization', `Bearer ${VALID_TOKEN}`)
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('VALIDATION_ERROR');
+    });
   });
 
   // ── Successful Generation ───────────────────────────────────────────────────
@@ -377,6 +387,18 @@ describe('POST /api/v1/analysis/:offerId/enhanced', () => {
         null
       );
     });
+
+    it('should generate report even with empty portfolio (no tracks)', async () => {
+      portfolioService.getUserPortfolio.mockResolvedValue({ ...mockPortfolio, tracks: [], averageRate: null });
+
+      const res = await request(app)
+        .post(`/api/v1/analysis/${VALID_OFFER_ID}/enhanced`)
+        .set('Authorization', `Bearer ${VALID_TOKEN}`)
+        .expect(201);
+
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.comparison.portfolioRate).toBeNull();
+    });
   });
 
   // ── Ownership Validation ────────────────────────────────────────────────────
@@ -446,6 +468,17 @@ describe('POST /api/v1/analysis/:offerId/enhanced', () => {
 
       expect(res.body.success).toBe(false);
     });
+
+    it('should return 500 when offer lookup throws a non-custom error', async () => {
+      offerService.findByIdAndUserId.mockRejectedValue(new Error('Firestore timeout'));
+
+      const res = await request(app)
+        .post(`/api/v1/analysis/${VALID_OFFER_ID}/enhanced`)
+        .set('Authorization', `Bearer ${VALID_TOKEN}`)
+        .expect(500);
+
+      expect(res.body.success).toBe(false);
+    });
   });
 
   // ── Response Shape ──────────────────────────────────────────────────────────
@@ -505,6 +538,23 @@ describe('POST /api/v1/analysis/:offerId/enhanced', () => {
       expect(insight).toHaveProperty('bodyHe');
       expect(insight).toHaveProperty('bodyEn');
       expect(insight).toHaveProperty('icon');
+    });
+
+    it('should include comparison with all required fields', async () => {
+      const res = await request(app)
+        .post(`/api/v1/analysis/${VALID_OFFER_ID}/enhanced`)
+        .set('Authorization', `Bearer ${VALID_TOKEN}`)
+        .expect(201);
+
+      const comparison = res.body.data.comparison;
+      expect(comparison).toHaveProperty('rateDelta');
+      expect(comparison).toHaveProperty('monthlySaving');
+      expect(comparison).toHaveProperty('totalSaving');
+      expect(comparison).toHaveProperty('loanAmount');
+      expect(comparison).toHaveProperty('termYears');
+      expect(comparison).toHaveProperty('bankRate');
+      expect(comparison).toHaveProperty('portfolioRate');
+      expect(comparison).toHaveProperty('trackComparison');
     });
   });
 });
