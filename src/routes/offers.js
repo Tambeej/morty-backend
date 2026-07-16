@@ -18,7 +18,15 @@ router.use(protect);
 /**
  * @route  POST /api/v1/offers
  * @desc   Upload a mortgage offer file (multipart/form-data, field: 'file')
- * @access Private
+ * @access Private — pay-per-upload
+ *
+ * Each upload must include an unconsumed `paymentSessionId` (multipart field).
+ * The voucher is consumed atomically inside the controller right before the
+ * upload is accepted (no route-level paywall middleware — a 500 elsewhere
+ * must not burn the payment). Returns 402 PAYMENT_REQUIRED when the voucher
+ * is missing, already consumed, or invalid; the client should then create a
+ * new checkout session via POST /api/v1/stripe/checkout and redirect the
+ * user to the returned `url`.
  */
 router.post('/', upload.single('file'), offersController.uploadOffer);
 

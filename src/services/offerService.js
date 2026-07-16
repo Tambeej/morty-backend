@@ -1,5 +1,5 @@
 /**
- * Offer Service – Firestore CRUD, Cloudinary upload, and AI analysis.
+ * Offer Service – Firestore CRUD, Firebase Storage upload, and AI analysis.
  *
  * All interactions with the `offers` Firestore collection are centralised here.
  * Controllers should use this service rather than touching Firestore directly.
@@ -9,8 +9,8 @@
  *   id:           string  (Firestore document ID, also stored as field)
  *   userId:       string  (required, indexed with createdAt desc)
  *   originalFile: {
- *     url:        string  (Cloudinary secure URL)
- *     mimetype:   string
+ *     storagePath: string  (path in Firebase Storage bucket)
+ *     mimetype:    string
  *   }
  *   extractedData: {
  *     bank:       string  (default '')
@@ -37,9 +37,55 @@
 
 'use strict';
 
+const { v4: uuidv4 } = require('uuid');
 const db = require('../config/firestore');
-const cloudinary = require('../config/cloudinary');
+const { getStorage } = require('../config/firebase');
 const logger = require('../utils/logger');
+
+/**
+ * Return the default Firebase Storage bucket instance.
+ * Bucket name is configured via FIREBASE_STORAGE_BUCKET env var.
+ */
+
+const storageBucket = () => {
+  const bucketName = process.env.FIREBASE_STORAGE_BUCKET || 'morty-8ce8f.firebasestorage.app';
+  return getStorage().bucket(bucketName);
+};
+
+/** Signed URL TTL for offer files (15 minutes) */
+const SIGNED_URL_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * Generate a fresh signed URL for a Storage object.
+ * Returns null if `storagePath` is falsy.
+ */
+async function signStoragePath(storagePath, ttlMs = SIGNED_URL_TTL_MS) {
+  if (!storagePath) return null;
+  try {
+    const [url] = await storageBucket()
+      .file(storagePath)
+      .getSignedUrl({ action: 'read', expires: Date.now() + ttlMs });
+    return url;
+  } catch (err) {
+    logger.warn(`offerService.signStoragePath failed (path=${storagePath}): ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Attach a fresh signed URL to `offer.originalFile.url` when a storagePath
+ * is present. Leaves legacy documents (with a pre-populated `url` and no
+ * `storagePath`) untouched.
+ */
+async function attachSignedUrl(offer) {
+  if (!offer || !offer.originalFile) return offer;
+  const { storagePath } = offer.originalFile;
+  if (storagePath) {
+    const url = await signStoragePath(storagePath);
+    offer.originalFile = { ...offer.originalFile, url };
+  }
+  return offer;
+}
 
 /** Firestore collection name */
 const COLLECTION = 'offers';
@@ -68,16 +114,19 @@ function snapToDoc(snap) {
  * Build a normalised offer data object with safe defaults.
  *
  * @param {string} userId       - Firestore user document ID
- * @param {Object} originalFile - { url: string, mimetype: string }
+ * @param {Object} originalFile - { storagePath: string, mimetype: string }
  * @param {string} [bankName]   - Optional bank name hint from the client
  * @returns {Object} Normalised offer document ready for Firestore
  */
-function buildOfferData(userId, originalFile, bankName = '') {
+function buildOfferData(userId, originalFile, bankName = '', paymentSessionId = null) {
   const now = new Date().toISOString();
   return {
     userId,
+    // The consumed payment voucher that paid for this upload (pay-per-upload).
+    // Its presence marks the offer as paid — enhanced analysis is included.
+    paymentSessionId: paymentSessionId || null,
     originalFile: {
-      url: originalFile.url,
+      storagePath: originalFile.storagePath,
       mimetype: originalFile.mimetype,
     },
     extractedData: {
@@ -123,7 +172,7 @@ async function findById(offerId) {
   if (!offerId) return null;
   try {
     const snap = await offersRef().doc(offerId).get();
-    return toPublicOffer(snapToDoc(snap));
+    return attachSignedUrl(toPublicOffer(snapToDoc(snap)));
   } catch (err) {
     logger.error(`offerService.findById error (id=${offerId}): ${err.message}`);
     throw err;
@@ -178,7 +227,8 @@ async function listOffersByUser(userId, { limit = 10, page = 1 } = {}) {
 
     const allOffers = snap.docs.map((d) => toPublicOffer({ id: d.id, ...d.data() }));
     const total     = allOffers.length;
-    const offers    = allOffers.slice(offset, offset + safeLimit);
+    const paged     = allOffers.slice(offset, offset + safeLimit);
+    const offers    = await Promise.all(paged.map(attachSignedUrl));
 
     return { offers, total };
   } catch (err) {
@@ -203,7 +253,8 @@ async function getRecentOffers(userId, n = 5) {
       .limit(n)
       .get();
 
-    return snap.docs.map((d) => toPublicOffer({ id: d.id, ...d.data() }));
+    const offers = snap.docs.map((d) => toPublicOffer({ id: d.id, ...d.data() }));
+    return Promise.all(offers.map(attachSignedUrl));
   } catch (err) {
     logger.error(`offerService.getRecentOffers error (userId=${userId}): ${err.message}`);
     throw err;
@@ -272,24 +323,24 @@ async function getOfferStats(userId) {
  * Create a new offer document in Firestore.
  *
  * @param {string} userId       - Firestore user document ID
- * @param {Object} originalFile - { url: string, mimetype: string }
+ * @param {Object} originalFile - { storagePath: string, mimetype: string }
  * @param {string} [bankName]   - Optional bank name hint
- * @returns {Promise<Object>} The created offer document
+ * @returns {Promise<Object>} The created offer document (with a fresh signed URL)
  */
-async function createOffer(userId, originalFile, bankName = '') {
+async function createOffer(userId, originalFile, bankName = '', paymentSessionId = null) {
   if (!userId) throw new Error('userId is required for createOffer');
-  if (!originalFile || !originalFile.url) {
-    throw new Error('originalFile.url is required for createOffer');
+  if (!originalFile || !originalFile.storagePath) {
+    throw new Error('originalFile.storagePath is required for createOffer');
   }
 
-  const offerData = buildOfferData(userId, originalFile, bankName);
+  const offerData = buildOfferData(userId, originalFile, bankName, paymentSessionId);
 
   try {
     const docRef = offersRef().doc();
     const docWithId = { id: docRef.id, ...offerData };
     await docRef.set(docWithId);
     logger.info(`offerService.createOffer: created offer ${docRef.id} for user ${userId}`);
-    return toPublicOffer(docWithId);
+    return attachSignedUrl(toPublicOffer(docWithId));
   } catch (err) {
     logger.error(`offerService.createOffer error (userId=${userId}): ${err.message}`);
     throw err;
@@ -362,7 +413,10 @@ async function saveAnalysisResults(offerId, extractedData, analysis) {
     analysis: {
       recommendedRate: analysis.recommendedRate ?? null,
       savings:         analysis.savings         ?? null,
-      aiReasoning:     analysis.aiReasoning     || '',
+      aiReasoningHe:   analysis.aiReasoningHe   || '',
+      aiReasoningEn:   analysis.aiReasoningEn   || '',
+      // Legacy alias — older frontend code reads `aiReasoning`
+      aiReasoning:     analysis.aiReasoning || analysis.aiReasoningEn || '',
     },
     status: 'analyzed',
   };
@@ -389,11 +443,11 @@ async function markOfferError(offerId) {
 
 /**
  * Delete an offer document from Firestore.
- * Optionally deletes the associated Cloudinary file.
+ * Optionally deletes the associated Firebase Storage file.
  *
  * @param {string}  offerId          - Firestore document ID
  * @param {string}  userId           - Must match offer.userId (ownership check)
- * @param {boolean} [deleteFile=true] - Whether to delete the Cloudinary file
+ * @param {boolean} [deleteFile=true] - Whether to delete the Storage file
  * @returns {Promise<void>}
  */
 async function deleteOffer(offerId, userId, deleteFile = true) {
@@ -408,27 +462,16 @@ async function deleteOffer(offerId, userId, deleteFile = true) {
   }
 
   try {
-    // Attempt to delete the Cloudinary file (non-fatal if it fails)
-    if (deleteFile && offer.originalFile && offer.originalFile.url) {
+    // Attempt to delete the Storage file (non-fatal if it fails).
+    if (deleteFile && offer.originalFile && offer.originalFile.storagePath) {
+      const { storagePath } = offer.originalFile;
       try {
-        // Extract public_id from Cloudinary URL
-        // URL format: https://res.cloudinary.com/<cloud>/raw/upload/<version>/<public_id>
-        const urlParts = offer.originalFile.url.split('/');
-        const uploadIndex = urlParts.indexOf('upload');
-        if (uploadIndex !== -1) {
-          // Skip version segment (v1234567890) if present
-          let publicIdParts = urlParts.slice(uploadIndex + 1);
-          if (publicIdParts[0] && /^v\d+$/.test(publicIdParts[0])) {
-            publicIdParts = publicIdParts.slice(1);
-          }
-          const publicId = publicIdParts.join('/').replace(/\.[^/.]+$/, '');
-          if (publicId) {
-            await cloudinary.uploader.destroy(publicId, { resource_type: 'raw' });
-            logger.info(`offerService.deleteOffer: deleted Cloudinary file ${publicId}`);
-          }
-        }
-      } catch (cloudErr) {
-        logger.warn(`offerService.deleteOffer: Cloudinary delete failed for offer ${offerId}: ${cloudErr.message}`);
+        await storageBucket().file(storagePath).delete();
+        logger.info(`offerService.deleteOffer: deleted Storage file ${storagePath}`);
+      } catch (storageErr) {
+        logger.warn(
+          `offerService.deleteOffer: Storage delete failed for offer ${offerId} (path=${storagePath}): ${storageErr.message}`
+        );
       }
     }
 
@@ -506,40 +549,80 @@ async function updateEnhancedAnalysis(offerId, enhancedReport) {
 
 // ── Upload helper ─────────────────────────────────────────────────────────────
 
+const MIME_EXTENSIONS = {
+  'application/pdf': 'pdf',
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+};
+
 /**
- * Upload a file buffer to Cloudinary and return the result.
+ * Best-effort delete of a Storage file (used to clean up orphans when an
+ * upload is rejected after the file was already written, e.g. payment
+ * consumption failed). Never throws.
  *
- * Uses a stream-based upload so the buffer is never written to disk.
+ * @param {string} storagePath - Path within the default bucket
+ * @returns {Promise<void>}
+ */
+async function deleteFileFromStorage(storagePath) {
+  if (!storagePath) return;
+  try {
+    await storageBucket().file(storagePath).delete();
+    logger.info(`offerService.deleteFileFromStorage: deleted ${storagePath}`);
+  } catch (err) {
+    logger.warn(`offerService.deleteFileFromStorage failed (path=${storagePath}): ${err.message}`);
+  }
+}
+
+/**
+ * Download a file from Firebase Storage as a Buffer.
+ *
+ * @param {string} storagePath - Path within the default bucket
+ * @returns {Promise<Buffer>}
+ */
+async function downloadFileFromStorage(storagePath) {
+  if (!storagePath) throw new Error('storagePath is required for downloadFileFromStorage');
+  try {
+    const [buffer] = await storageBucket().file(storagePath).download();
+    return buffer;
+  } catch (err) {
+    logger.error(`offerService.downloadFileFromStorage error (path=${storagePath}): ${err.message}`);
+    throw new Error(`Storage download failed: ${err.message}`);
+  }
+}
+
+/**
+ * Upload a file buffer to Firebase Storage.
+ *
+ * Path layout: `offers/<userId>/<uuid>.<ext>`. Files are private; callers
+ * receive fresh signed URLs via `attachSignedUrl` on reads.
  *
  * @param {Buffer} buffer   - File buffer (from multer memoryStorage)
  * @param {string} mimetype - MIME type of the file
- * @returns {Promise<{ url: string, publicId: string }>}
+ * @param {string} userId   - Owner's Firestore user document ID
+ * @returns {Promise<{ storagePath: string }>}
  */
-async function uploadFileToCloudinary(buffer, mimetype) {
-  if (!buffer) throw new Error('buffer is required for uploadFileToCloudinary');
+async function uploadFileToStorage(buffer, mimetype, userId) {
+  if (!buffer) throw new Error('buffer is required for uploadFileToStorage');
+  if (!userId) throw new Error('userId is required for uploadFileToStorage');
 
-  return new Promise((resolve, reject) => {
-    const resourceType = mimetype === 'application/pdf' ? 'raw' : 'image';
+  const ext = MIME_EXTENSIONS[mimetype] || 'bin';
+  //const storagePath = `offers/${userId}/${uuidv4()}.${ext}`;
+  // Create a clean destination path in your bucket
+  const storagePath = `offers/${userId}/${Date.now()}_offer`;
 
-    const uploadStream = cloudinary.uploader.upload_stream(
-      {
-        folder: 'morty/offers',
-        resource_type: resourceType,
-      },
-      (error, result) => {
-        if (error) {
-          logger.error(`offerService.uploadFileToCloudinary: Cloudinary error: ${error.message}`);
-          return reject(new Error(`Cloudinary upload failed: ${error.message}`));
-        }
-        resolve({
-          url: result.secure_url,
-          publicId: result.public_id,
-        });
-      }
-    );
-
-    uploadStream.end(buffer);
-  });
+  try {
+    await storageBucket().file(storagePath).save(buffer, {
+      contentType: mimetype,
+      resumable: false,
+      metadata: { cacheControl: 'private, max-age=0, no-store' },
+    });
+    logger.info(`offerService.uploadFileToStorage: uploaded ${storagePath}`);
+    return { storagePath };
+  } catch (err) {
+    logger.error(`offerService.uploadFileToStorage error (path=${storagePath}): ${err.message}`);
+    throw new Error(`Storage upload failed: ${err.message}`);
+  }
 }
 
 // ── Exports ───────────────────────────────────────────────────────────────────
@@ -563,8 +646,13 @@ module.exports = {
   deleteOffer,
   // Enhanced analysis (paid feature)
   updateEnhancedAnalysis,
-  // Upload
-  uploadFileToCloudinary,
+  // Upload / download
+  uploadFileToStorage,
+  downloadFileFromStorage,
+  deleteFileFromStorage,
+  // URL signing
+  signStoragePath,
+  attachSignedUrl,
   // Internal helpers (exported for testing)
   buildOfferData,
   toPublicOffer,

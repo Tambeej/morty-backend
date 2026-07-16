@@ -92,6 +92,21 @@ async function generateEnhancedReport(req, res, next) {
       throw new ForbiddenError('You do not have permission to access this offer');
     }
 
+    // Pay-per-upload: enhanced analysis is included in the upload's payment.
+    // An offer is "paid" iff it was created by consuming a payment voucher
+    // (offer.paymentSessionId is set). Enable this check when the payment
+    // flow goes live; the route's paidAccess middleware mock stays a no-op.
+    /*
+    if (!offer.paymentSessionId) {
+      const err = new AppError(
+        'This offer was not created with a paid upload. Enhanced analysis is unavailable.',
+        402,
+        'PAYMENT_REQUIRED'
+      );
+      throw err;
+    }
+    */
+
     // 2. Return cached report if it already exists (idempotent).
     //    This prevents duplicate AI calls and ensures consistent results.
     if (offer.analysis && offer.analysis.enhanced) {

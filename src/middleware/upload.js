@@ -5,7 +5,6 @@
  */
 
 const multer = require('multer');
-const path = require('path');
 const { AppError } = require('../utils/errors');
 
 /**
@@ -25,7 +24,7 @@ const ALLOWED_MIME_TYPES = [
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
 
 /**
- * Use memory storage so we can stream the buffer directly to Cloudinary.
+ * Use memory storage so we can stream the buffer directly to Firebase Storage.
  * Files are NOT written to disk.
  */
 const storage = multer.memoryStorage();

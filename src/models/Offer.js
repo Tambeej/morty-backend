@@ -10,8 +10,8 @@
  *   id:     string  (Firestore document ID)
  *   userId: string  (required, indexed with createdAt desc)
  *   originalFile: {
- *     url:      string  (Cloudinary URL)
- *     mimetype: string
+ *     storagePath: string  (Firebase Storage path)
+ *     mimetype:    string
  *   }
  *   extractedData: {
  *     bank:   string  (default '')

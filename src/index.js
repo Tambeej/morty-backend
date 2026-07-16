@@ -13,6 +13,15 @@ const logger = require('./utils/logger');
 
 // Route imports
 const analysisRoutes = require('./routes/analysis');
+const authRoutes = require('./routes/auth');
+const dashboardRoutes = require('./routes/dashboard');
+const mortgageCaseRoutes = require('./routes/mortgageCaseRoutes');
+const offersRoutes = require('./routes/offers');
+const profileRoutes = require('./routes/profile');
+const ratesRoutes = require('./routes/rates');
+const stripeRoutes = require('./routes/stripe');
+const wizardRoutes = require('./routes/wizard');
+const wizardPrivateRoutes = require('./routes/wizardPrivateRoutes');
 
 // Initialise Firebase before anything else
 try {
@@ -51,7 +60,16 @@ app.get('/health', (req, res) => {
 });
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
+app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1/profile', profileRoutes);
+app.use('/api/v1/dashboard', dashboardRoutes);
+app.use('/api/v1/offers', offersRoutes);
 app.use('/api/v1/analysis', analysisRoutes);
+app.use('/api/v1/stripe', stripeRoutes);
+app.use('/api/v1/wizard', wizardPrivateRoutes);
+app.use('/api/v1/public/wizard', wizardRoutes);
+app.use('/api/v1/public/rates', ratesRoutes);
+app.use('/api/v1', mortgageCaseRoutes);
 
 // ─── 404 handler ─────────────────────────────────────────────────────────────
 app.use((req, res) => {

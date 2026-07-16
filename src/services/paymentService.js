@@ -1,520 +1,232 @@
-/**
- * Payment Service – Stripe Integration for Expert Analysis Paywall
- *
- * Handles Stripe Checkout Session creation and webhook event processing.
- * When a user pays for expert analysis, this service:
- *   1. Creates a Stripe Checkout Session with the analysis product/price
- *   2. Processes the `checkout.session.completed` webhook event
- *   3. Sets `paidAnalyses: true` on the user's Firestore document
- *
- * SCA-compliant via Stripe Checkout (hosted payment page).
- *
- * Environment variables required:
- *   - STRIPE_SECRET_KEY:     Stripe API secret key
- *   - STRIPE_WEBHOOK_SECRET: Stripe webhook endpoint signing secret
- *   - STRIPE_PRICE_ID:       Stripe Price ID for the analysis product
- *
- * @module paymentService
- */
-
 'use strict';
 
-const Stripe = require('stripe');
+const axios = require('axios');
 const db = require('../config/firestore');
 const logger = require('../utils/logger');
 
-// ── Stripe Client Initialisation ──────────────────────────────────────────────
-
-let stripe;
-if (process.env.STRIPE_SECRET_KEY) {
-  stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-    apiVersion: '2024-06-20',
-    appInfo: {
-      name: 'Morty',
-      version: '1.0.0',
-    },
-  });
-}
-
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-/** Default analysis price in ILS (agorot) – ₪149 */
-const DEFAULT_PRICE_AMOUNT = 14900;
-
-/** Currency for payments */
-const CURRENCY = 'ils';
-
-/** Firestore collection for payment records */
+const BASE_URL = process.env.MORNING_BASE_URL || 'https://api.greeninvoice.co.il/api/v1';
 const PAYMENTS_COLLECTION = 'payments';
 
-/** Firestore collection for users */
-const USERS_COLLECTION = 'users';
-
-// ── Checkout Session Creation ─────────────────────────────────────────────────
-
 /**
- * Create a Stripe Checkout Session for the expert analysis product.
- *
- * The session is configured for a one-time payment using Stripe's
- * hosted payment page (SCA-compliant). Metadata includes the userId
- * and optional portfolioId for post-payment processing.
- *
- * @param {object} params
- * @param {string} params.userId       - Authenticated user's Firestore ID
- * @param {string} params.userEmail    - User's email for Stripe customer
- * @param {string} [params.portfolioId] - Optional portfolio ID to link
- * @param {string} params.successUrl   - URL to redirect after successful payment
- * @param {string} [params.cancelUrl]  - URL to redirect if payment is cancelled
- * @returns {Promise<{ sessionId: string, url: string }>} Checkout session details
- * @throws {Error} If Stripe is not configured or session creation fails
+ * Step 1: Secure a rolling OAuth2 Access Token from Morning (Valid for 1 Hour)
  */
-async function createCheckoutSession({
-  userId,
-  userEmail,
-  portfolioId = null,
-  successUrl,
-  cancelUrl = null,
-}) {
-  if (!stripe) {
-    const err = new Error('Stripe is not configured. Set STRIPE_SECRET_KEY environment variable.');
-    err.statusCode = 503;
-    err.errorCode = 'STRIPE_NOT_CONFIGURED';
-    throw err;
-  }
-
-  if (!userId) {
-    const err = new Error('userId is required to create a checkout session');
-    err.statusCode = 400;
-    throw err;
-  }
-
-  if (!successUrl) {
-    const err = new Error('successUrl is required to create a checkout session');
-    err.statusCode = 400;
-    throw err;
-  }
-
-  // Check if user already has paid access
-  const userDoc = await db.collection(USERS_COLLECTION).doc(userId).get();
-  if (userDoc.exists && userDoc.data().paidAnalyses === true) {
-    const err = new Error('User already has paid access to expert analysis');
-    err.statusCode = 409;
-    err.errorCode = 'ALREADY_PAID';
-    throw err;
-  }
-
-  logger.info(`paymentService.createCheckoutSession: creating session for user ${userId}`);
-
+async function getAccessToken() {
   try {
-    // Build line items – use configured Price ID or create ad-hoc price
-    const lineItems = buildLineItems();
+    const isSandbox = process.env.MORNING_BASE_URL?.includes('sandbox');
+    const tokenUrl = isSandbox
+        ? 'https://api.sandbox.morning.dev/idp/v1/oauth/token'
+        : 'https://api.morning.co/idp/v1/oauth/token';
 
-    // Build session parameters
-    const sessionParams = {
-      mode: 'payment',
-      payment_method_types: ['card'],
-      line_items: lineItems,
-      success_url: successUrl,
-      cancel_url: cancelUrl || successUrl,
-      client_reference_id: userId,
-      customer_email: userEmail || undefined,
-      metadata: {
-        userId,
-        portfolioId: portfolioId || '',
-        product: 'expert_analysis',
-      },
-      payment_intent_data: {
-        metadata: {
-          userId,
-          portfolioId: portfolioId || '',
-          product: 'expert_analysis',
-        },
-      },
-      locale: 'he',
-    };
-
-    const session = await stripe.checkout.sessions.create(sessionParams);
-
-    logger.info(`paymentService.createCheckoutSession: session ${session.id} created for user ${userId}`);
-
-    // Store a pending payment record in Firestore
-    await storePendingPayment(userId, session.id, portfolioId);
-
-    return {
-      sessionId: session.id,
-      url: session.url,
-    };
-  } catch (err) {
-    // Re-throw known errors
-    if (err.statusCode) throw err;
-
-    logger.error(`paymentService.createCheckoutSession error: ${err.message}`);
-    const wrappedErr = new Error('Failed to create payment session. Please try again.');
-    wrappedErr.statusCode = 500;
-    wrappedErr.errorCode = 'CHECKOUT_SESSION_FAILED';
-    throw wrappedErr;
-  }
-}
-
-/**
- * Build Stripe line items for the checkout session.
- *
- * Uses STRIPE_PRICE_ID if configured (recommended for production),
- * otherwise creates an ad-hoc price_data object.
- *
- * @returns {Array<object>} Stripe line items array
- */
-function buildLineItems() {
-  const priceId = process.env.STRIPE_PRICE_ID;
-
-  if (priceId) {
-    // Use pre-configured Stripe Price
-    return [
-      {
-        price: priceId,
-        quantity: 1,
-      },
-    ];
-  }
-
-  // Ad-hoc price (for development / when no Price ID is configured)
-  return [
-    {
-      price_data: {
-        currency: CURRENCY,
-        unit_amount: DEFAULT_PRICE_AMOUNT,
-        product_data: {
-          name: 'ניתוח משכנתא מקצועי – Morty',
-          description:
-            'ניתוח OCR מקצועי, טריקים למשכנתא, סקריפט משא ומתן בעברית, ותובנות אסטרטגיות',
-        },
-      },
-      quantity: 1,
-    },
-  ];
-}
-
-// ── Webhook Processing ────────────────────────────────────────────────────────
-
-/**
- * Verify and construct a Stripe webhook event from the raw request body.
- *
- * Uses the Stripe webhook signing secret to verify the event signature,
- * preventing replay attacks and ensuring the event originated from Stripe.
- *
- * @param {Buffer|string} rawBody  - Raw request body (must NOT be parsed as JSON)
- * @param {string}        signature - Stripe-Signature header value
- * @returns {object} Verified Stripe event object
- * @throws {Error} If signature verification fails
- */
-function constructWebhookEvent(rawBody, signature) {
-  if (!stripe) {
-    const err = new Error('Stripe is not configured');
-    err.statusCode = 503;
-    throw err;
-  }
-
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!webhookSecret) {
-    const err = new Error('STRIPE_WEBHOOK_SECRET is not configured');
-    err.statusCode = 503;
-    throw err;
-  }
-
-  try {
-    return stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
-  } catch (err) {
-    logger.warn(`paymentService.constructWebhookEvent: signature verification failed: ${err.message}`);
-    const verifyErr = new Error('Webhook signature verification failed');
-    verifyErr.statusCode = 400;
-    verifyErr.errorCode = 'WEBHOOK_SIGNATURE_INVALID';
-    throw verifyErr;
-  }
-}
-
-/**
- * Handle a verified Stripe webhook event.
- *
- * Currently handles:
- *   - `checkout.session.completed`: Unlocks paid analysis for the user
- *   - `checkout.session.expired`: Marks the payment record as expired
- *
- * Unknown event types are logged and acknowledged (200) to prevent
- * Stripe from retrying them.
- *
- * @param {object} event - Verified Stripe event object
- * @returns {Promise<{ handled: boolean, type: string, message: string }>}
- */
-async function handleWebhookEvent(event) {
-  const eventType = event.type;
-
-  logger.info(`paymentService.handleWebhookEvent: processing ${eventType} (${event.id})`);
-
-  switch (eventType) {
-    case 'checkout.session.completed':
-      return handleCheckoutCompleted(event.data.object);
-
-    case 'checkout.session.expired':
-      return handleCheckoutExpired(event.data.object);
-
-    default:
-      logger.info(`paymentService.handleWebhookEvent: unhandled event type ${eventType}`);
-      return {
-        handled: false,
-        type: eventType,
-        message: `Event type ${eventType} not handled`,
-      };
-  }
-}
-
-/**
- * Handle a completed checkout session.
- *
- * Sets `paidAnalyses: true` on the user's Firestore document and
- * updates the payment record to 'completed' status.
- *
- * @param {object} session - Stripe Checkout Session object
- * @returns {Promise<{ handled: boolean, type: string, message: string }>}
- */
-async function handleCheckoutCompleted(session) {
-  const userId = session.metadata?.userId || session.client_reference_id;
-  const portfolioId = session.metadata?.portfolioId || null;
-  const sessionId = session.id;
-  const paymentIntentId = session.payment_intent;
-  const amountTotal = session.amount_total;
-  const currency = session.currency;
-  const customerEmail = session.customer_details?.email || session.customer_email;
-
-  if (!userId) {
-    logger.error(`paymentService.handleCheckoutCompleted: no userId in session ${sessionId}`);
-    return {
-      handled: false,
-      type: 'checkout.session.completed',
-      message: 'Missing userId in session metadata',
-    };
-  }
-
-  logger.info(
-    `paymentService.handleCheckoutCompleted: unlocking paid access for user ${userId} ` +
-    `(session: ${sessionId}, amount: ${amountTotal} ${currency})`
-  );
-
-  try {
-    // 1. Set paidAnalyses flag on user document
-    const userRef = db.collection(USERS_COLLECTION).doc(userId);
-    const userDoc = await userRef.get();
-
-    if (!userDoc.exists) {
-      logger.error(`paymentService.handleCheckoutCompleted: user ${userId} not found in Firestore`);
-      return {
-        handled: false,
-        type: 'checkout.session.completed',
-        message: `User ${userId} not found`,
-      };
-    }
-
-    await userRef.update({
-      paidAnalyses: true,
-      paidAt: new Date().toISOString(),
-      stripeSessionId: sessionId,
-      stripePaymentIntentId: paymentIntentId || null,
-      updatedAt: new Date().toISOString(),
+    const response = await axios.post(tokenUrl, {
+      client_id: process.env.MORNING_CLIENT_ID?.trim(),
+      client_secret: process.env.MORNING_CLIENT_SECRET?.trim(),
+      grant_type: 'client_credentials'
     });
 
-    logger.info(`paymentService.handleCheckoutCompleted: paidAnalyses set to true for user ${userId}`);
-
-    // 2. Update payment record
-    await updatePaymentRecord(sessionId, {
-      status: 'completed',
-      paymentIntentId: paymentIntentId || null,
-      amountTotal,
-      currency,
-      customerEmail: customerEmail || null,
-      completedAt: new Date().toISOString(),
-    });
-
-    return {
-      handled: true,
-      type: 'checkout.session.completed',
-      message: `Paid access unlocked for user ${userId}`,
-    };
+    return response.data.accessToken;
   } catch (err) {
-    logger.error(
-      `paymentService.handleCheckoutCompleted error for user ${userId}: ${err.message}`
-    );
-    // Re-throw so the webhook endpoint returns 500 and Stripe retries
-    throw err;
+    //️ Log the exact error object coming back from Morning's auth gateway
+    logger.error(`Morning Auth Token Generation Failed: ${err.response?.data?.error_description || err.response?.data?.message || err.message}`);
+    throw new Error('Payment service authentication failed.');
   }
 }
 
 /**
- * Handle an expired checkout session.
- *
- * Updates the payment record to 'expired' status.
- *
- * @param {object} session - Stripe Checkout Session object
- * @returns {Promise<{ handled: boolean, type: string, message: string }>}
+ * Step 2: Generate Morning Hosted Checkout Page Link
  */
-async function handleCheckoutExpired(session) {
-  const sessionId = session.id;
-  const userId = session.metadata?.userId || session.client_reference_id;
-
-  logger.info(`paymentService.handleCheckoutExpired: session ${sessionId} expired for user ${userId || 'unknown'}`);
+async function createCheckoutSession({ userId, userEmail, portfolioId = null, successUrl }) {
+  const token = await getAccessToken();
 
   try {
-    await updatePaymentRecord(sessionId, {
-      status: 'expired',
-      expiredAt: new Date().toISOString(),
+    // Build Morning-compliant payment payload structure
+    const paymentFormPayload = {
+      amount: 50, // Price in ILS
+      currency: 'ILS',
+      maxPayments: 1, // Single payment layout
+      language: 'he', // Renders the UI natively in Hebrew
+      successUrl: successUrl,
+      failureUrl: successUrl, // Redirect back to manage flow if rejected
+      notifyUrl: `${process.env.BACKEND_API_URL}/api/v1/stripe/webhook`, // Pointing to your webhook route
+
+      // Custom metadata map attached to the checkout request tracking context
+      custom: JSON.stringify({ userId, portfolioId }),
+
+      // Pre-fills customer identity inside Morning's billing form
+      client: {
+        email: userEmail,
+        emails: [userEmail]
+      }
+    };
+
+    const response = await axios.post(`${BASE_URL}/payments/form`, paymentFormPayload, {
+      headers: { Authorization: `Bearer ${token}` }
     });
 
-    return {
-      handled: true,
-      type: 'checkout.session.expired',
-      message: `Session ${sessionId} marked as expired`,
-    };
-  } catch (err) {
-    logger.warn(`paymentService.handleCheckoutExpired error: ${err.message}`);
-    // Non-fatal – acknowledge the event
-    return {
-      handled: true,
-      type: 'checkout.session.expired',
-      message: `Session ${sessionId} expired (record update failed)`,
-    };
-  }
-}
+    // Morning returns a session token parameter and a direct structural checkout path
+    const { id, url } = response.data;
 
-// ── Payment Record Helpers ────────────────────────────────────────────────────
-
-/**
- * Store a pending payment record in Firestore.
- *
- * This creates an audit trail for all checkout attempts.
- *
- * @param {string} userId      - User's Firestore ID
- * @param {string} sessionId   - Stripe Checkout Session ID
- * @param {string|null} portfolioId - Optional portfolio ID
- * @returns {Promise<void>}
- */
-async function storePendingPayment(userId, sessionId, portfolioId) {
-  try {
-    const now = new Date().toISOString();
-    await db.collection(PAYMENTS_COLLECTION).doc(sessionId).set({
+    // Persist your internal system audit log in Firestore.
+    // consumed:false marks this payment as an unused upload voucher —
+    // it flips to true exactly once, when an upload is accepted.
+    await db.collection(PAYMENTS_COLLECTION).doc(id).set({
       userId,
-      sessionId,
+      sessionId: id,
       portfolioId: portfolioId || null,
       product: 'expert_analysis',
       status: 'pending',
-      createdAt: now,
-      updatedAt: now,
+      consumed: false,
+      createdAt: new Date().toISOString()
     });
-    logger.debug(`paymentService.storePendingPayment: stored pending payment ${sessionId}`);
+
+    return { sessionId: id, url: url };
   } catch (err) {
-    // Non-fatal – the payment can still proceed without the record
-    logger.warn(`paymentService.storePendingPayment error: ${err.message}`);
+    logger.error(`Morning Checkout Form Generation Failed: ${err.response?.data?.errorMessage || err.message}`);
+    throw err;
   }
 }
 
 /**
- * Update a payment record in Firestore.
- *
- * @param {string} sessionId - Stripe Checkout Session ID (document ID)
- * @param {object} updates   - Fields to update
- * @returns {Promise<void>}
- */
-async function updatePaymentRecord(sessionId, updates) {
-  try {
-    const docRef = db.collection(PAYMENTS_COLLECTION).doc(sessionId);
-    const doc = await docRef.get();
-
-    if (doc.exists) {
-      await docRef.update({
-        ...updates,
-        updatedAt: new Date().toISOString(),
-      });
-    } else {
-      // Create the record if it doesn't exist (e.g., webhook arrived before storePendingPayment)
-      await docRef.set({
-        sessionId,
-        ...updates,
-        updatedAt: new Date().toISOString(),
-      });
-    }
-  } catch (err) {
-    logger.warn(`paymentService.updatePaymentRecord error (${sessionId}): ${err.message}`);
-  }
-}
-
-// ── Query Helpers ─────────────────────────────────────────────────────────────
-
-/**
- * Check if a user has paid for expert analysis.
- *
- * Reads directly from Firestore to get the latest status.
- *
- * @param {string} userId - User's Firestore ID
- * @returns {Promise<boolean>} True if user has paid access
+ * Checks if the user has a valid active payment
  */
 async function hasUserPaid(userId) {
-  if (!userId) return false;
+  /*try {
+    // 1. Look up the user's latest payment record in your Firestore
+    const paymentsSnapshot = await db.collection(PAYMENTS_COLLECTION)
+      .where('userId', '==', userId)
+      .where('status', '==', 'completed')
+      .limit(1)
+      .get();
 
-  try {
-    const userDoc = await db.collection(USERS_COLLECTION).doc(userId).get();
-    if (!userDoc.exists) return false;
-    return userDoc.data().paidAnalyses === true;
-  } catch (err) {
-    logger.error(`paymentService.hasUserPaid error (userId=${userId}): ${err.message}`);
+    if (!paymentsSnapshot.empty) {
+      return true;
+    }
+
+    // 2. Fallback / Deep Sync: Check pending transactions directly against Morning's API
+    const pendingSnapshot = await db.collection(PAYMENTS_COLLECTION)
+      .where('userId', '==', userId)
+      .where('status', '==', 'pending')
+      .get();
+
+    if (pendingSnapshot.empty) return false;
+
+    const token = await getAccessToken();
+
+    // Verify the state of the payment form directly via Morning's system
+    for (const doc of pendingSnapshot.docs) {
+      const paymentData = doc.data();
+
+      // Morning endpoint to fetch details of a specific payment form setup
+      const response = await axios.get(`${BASE_URL}/payments/form/${paymentData.sessionId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      // If Morning confirms it was filled out successfully and a document was generated
+      if (response.data.isCompleted || response.data.documentId) {
+        // Update your internal database status so next time it ends at step 1
+        await doc.ref.update({ status: 'completed', completedAt: new Date().toISOString() });
+        return true;
+      }
+    }
+
     return false;
-  }
+  } catch (err) {
+    logger.error(`Error verifying Morning payment status for user ${userId}: ${err.message}`);
+    return false;
+  }*/
+  logger.info(`🕵️‍♂️ Mocking hasUserPaid check for user: ${userId} -> Returning TRUE`);
+  // FORCE TRUE: Instantly passes the frontend payment guard wall
+  return true;
 }
 
 /**
- * Get payment history for a user.
- *
- * @param {string} userId - User's Firestore ID
- * @returns {Promise<Array<object>>} Payment records sorted by createdAt desc
+ * Retrieves the historical payment ledger for a user profile
  */
 async function getPaymentHistory(userId) {
-  if (!userId) return [];
-
-  try {
-    const snap = await db
-      .collection(PAYMENTS_COLLECTION)
+  /*try {
+    const snapshot = await db.collection(PAYMENTS_COLLECTION)
       .where('userId', '==', userId)
       .orderBy('createdAt', 'desc')
-      .limit(20)
       .get();
 
-    return snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    if (snapshot.empty) return [];
+
+    return snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
   } catch (err) {
-    logger.error(`paymentService.getPaymentHistory error (userId=${userId}): ${err.message}`);
+    logger.error(`Error fetching payment history for user ${userId}: ${err.message}`);
     return [];
-  }
+  }*/
+  logger.info(`🕵️‍♂️ Mocking getPaymentHistory for user: ${userId}`);
+  // Return a dummy array matching the data structure your UI map functions expect
+  return [
+    {
+      id: "mock_payment_123",
+      amount: 149,
+      currency: "ILS",
+      status: "completed",
+      createdAt: new Date().toISOString(),
+      product: "expert_analysis"
+    }
+  ];
 }
 
-// ── Exports ───────────────────────────────────────────────────────────────────
+
+/**
+ * Atomically consume a payment session for one upload (pay-per-upload).
+ *
+ * Called by the upload controller right before the upload is accepted, so a
+ * failure earlier in the flow (bad file, storage error) never burns the
+ * user's payment. The client keeps the sessionId until the upload returns
+ * success; a genuine retry reuses the same session — only `consumed: true`
+ * blocks reuse. The Firestore transaction prevents double-spend from
+ * concurrent/duplicate requests.
+ *
+ * @param {string} userId           - Authenticated user's Firestore doc ID
+ * @param {string} paymentSessionId - Morning checkout session ID (the voucher)
+ * @returns {Promise<boolean>} true if the session was valid and is now consumed
+ */
+async function consumePaymentForUpload(userId, paymentSessionId) {
+  // ── Real implementation (disabled while payment flow is mocked) ────────────
+  // To restore: delete the MOCK return at the bottom and uncomment this block.
+  /*
+  if (!paymentSessionId) return false;
+
+  const paymentRef = db.collection(PAYMENTS_COLLECTION).doc(paymentSessionId);
+
+  try {
+    return await db.runTransaction(async (tx) => {
+      const snap = await tx.get(paymentRef);
+      if (!snap.exists) return false;
+
+      const payment = snap.data();
+      if (payment.userId !== userId) return false;   // not their voucher
+      if (payment.consumed === true) return false;   // already spent
+      if (payment.status !== 'completed') return false; // not paid (webhook/status-verify sets this)
+
+      tx.update(paymentRef, {
+        consumed: true,
+        consumedAt: new Date().toISOString(),
+      });
+      return true;
+    });
+  } catch (err) {
+    logger.error(`consumePaymentForUpload failed (session=${paymentSessionId}): ${err.message}`);
+    return false;
+  }
+  */
+
+  // MOCK pay-per-upload: pass only if a (fake) voucher was supplied this time.
+  // Lets the frontend exercise the full pay-every-time redirect loop without
+  // real Morning charges.
+  logger.info(`🕵 Mock consumePaymentForUpload: session=${paymentSessionId}`);
+  return Boolean(paymentSessionId);
+}
 
 module.exports = {
-  // Checkout
   createCheckoutSession,
-  buildLineItems,
-
-  // Webhook
-  constructWebhookEvent,
-  handleWebhookEvent,
-  handleCheckoutCompleted,
-  handleCheckoutExpired,
-
-  // Queries
   hasUserPaid,
   getPaymentHistory,
-
-  // Internal helpers (exported for testing)
-  storePendingPayment,
-  updatePaymentRecord,
-
-  // Constants
-  DEFAULT_PRICE_AMOUNT,
-  CURRENCY,
-  PAYMENTS_COLLECTION,
-  USERS_COLLECTION,
+  consumePaymentForUpload
 };

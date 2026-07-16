@@ -26,10 +26,10 @@ let dbInstance = null;
  * Build credential
  */
 function buildCredential() {
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  /*if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     logger.info('Firestore: using GOOGLE_APPLICATION_CREDENTIALS file');
     return admin.credential.applicationDefault();
-  }
+  }*/
 
   const projectId = process.env.FIREBASE_PROJECT_ID;
   const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;

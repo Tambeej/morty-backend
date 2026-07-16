@@ -20,14 +20,16 @@ const Joi = require('joi');
  *   - cancelUrl: Optional. URI for cancellation redirect.
  *   - portfolioId: Optional. Links the payment to a specific portfolio.
  */
+// MOCK — while payment flow is bypassed, all fields are optional and the
+// controller returns a mock session. Tighten this back up when re-enabling
+// real Stripe checkout (successUrl should be required + a valid URI).
 const checkoutSchema = Joi.object({
   successUrl: Joi.string()
     .uri({ scheme: ['http', 'https'] })
-    .required()
+    .optional()
+    .allow('')
     .messages({
       'string.uri': 'successUrl must be a valid HTTP/HTTPS URL',
-      'any.required': 'successUrl is required',
-      'string.empty': 'successUrl cannot be empty',
     }),
   cancelUrl: Joi.string()
     .uri({ scheme: ['http', 'https'] })
@@ -40,7 +42,7 @@ const checkoutSchema = Joi.object({
     .trim()
     .max(200)
     .optional()
-    .allow('')
+    .allow('', null)
     .messages({
       'string.max': 'portfolioId cannot exceed 200 characters',
     }),

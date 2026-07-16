@@ -14,12 +14,17 @@ function initializeFirebase() {
     return firebaseApp;
   }
 
+  if (admin.apps.length > 0) {
+    firebaseApp = admin.app();
+    return firebaseApp;
+  }
+
   try {
     const projectId = process.env.FIREBASE_PROJECT_ID;
     const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
     const privateKey = process.env.FIREBASE_PRIVATE_KEY
-      ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
-      : undefined;
+        ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
+        : undefined;
 
     let credential;
     if (projectId && clientEmail && privateKey) {
@@ -29,13 +34,13 @@ function initializeFirebase() {
         privateKey,
       });
     } else {
-      // Fall back to application default credentials
       credential = admin.credential.applicationDefault();
     }
 
     firebaseApp = admin.initializeApp({
       credential,
       projectId: projectId || process.env.GOOGLE_CLOUD_PROJECT,
+      storageBucket: process.env.FIREBASE_STORAGE_BUCKET || `${projectId}.firebasestorage.app`,
     });
 
     logger.info('Firebase Admin SDK initialized successfully');
@@ -44,6 +49,22 @@ function initializeFirebase() {
     logger.error('Failed to initialize Firebase Admin SDK', { error: error.message });
     throw error;
   }
+}
+
+/**
+ * Get Firebase Storage instance.
+ * 🛠️ FIX: If the base app was initialized elsewhere without a bucket options object,
+ * we explicitly pass the environment fallback parameter directly into the storage constructor call.
+ */
+function getStorage() {
+  if (!firebaseApp) {
+    initializeFirebase();
+  }
+
+  const bucketName = process.env.FIREBASE_STORAGE_BUCKET || `${process.env.FIREBASE_PROJECT_ID}.firebasestorage.app`;
+
+  // This explicitly sets the bucket during runtime retrieval!
+  return admin.storage();
 }
 
 /**
@@ -66,9 +87,22 @@ function getAuth() {
   return admin.auth();
 }
 
+// Lazy proxy: resolves to admin.firestore() on first property access,
+// so requiring this module doesn't force init before credentials are loaded.
+const db = new Proxy({}, {
+  get(_target, prop) {
+    if (!firebaseApp && admin.apps.length === 0) {
+      initializeFirebase();
+    }
+    return admin.firestore()[prop];
+  },
+});
+
 module.exports = {
   initializeFirebase,
   getFirestore,
   getAuth,
+  getStorage,
   admin,
+  db,
 };

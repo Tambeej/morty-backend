@@ -43,6 +43,11 @@ const { sendSuccess, sendError } = require('../utils/response');
  * @param {import('express').Request}  req
  * @param {import('express').Response} res
  */
+// ── Real implementation (disabled while payment flow is mocked) ──────────────
+// To restore: uncomment the block below, delete the MOCK export that follows,
+// and tighten checkoutSchema in validators/paymentValidator.js (make
+// successUrl required again).
+/*
 exports.createCheckout = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -63,24 +68,26 @@ exports.createCheckout = async (req, res) => {
 
     return sendSuccess(res, result, 'Checkout session created successfully');
   } catch (err) {
-    // Handle known error types with appropriate status codes
     if (err.statusCode) {
-      return sendError(
-        res,
-        err.message,
-        err.statusCode,
-        err.errorCode || 'CHECKOUT_ERROR'
-      );
+      return sendError(res, err.message, err.statusCode, err.errorCode || 'CHECKOUT_ERROR');
     }
-
     logger.error(`paymentController.createCheckout error: ${err.message}`);
-    return sendError(
-      res,
-      'Failed to create checkout session',
-      500,
-      'CHECKOUT_ERROR'
-    );
+    return sendError(res, 'Failed to create checkout session', 500, 'CHECKOUT_ERROR');
   }
+};
+*/
+
+// MOCK — payment gate is bypassed during development.
+exports.createCheckout = async (req, res) => {
+  const { successUrl } = req.body;
+  return sendSuccess(
+    res,
+    {
+      sessionId: 'mock_session_12345',
+      url: successUrl || 'http://localhost:3000/payment-success',
+    },
+    'Checkout session created successfully'
+  );
 };
 
 /**
@@ -100,48 +107,50 @@ exports.createCheckout = async (req, res) => {
  * @param {import('express').Response} res
  */
 exports.handleWebhook = async (req, res) => {
-  const signature = req.headers['stripe-signature'];
-
-  if (!signature) {
-    logger.warn('paymentController.handleWebhook: missing Stripe-Signature header');
-    return res.status(400).json({
-      success: false,
-      message: 'Missing Stripe-Signature header',
-    });
-  }
-
-  let event;
   try {
-    event = paymentService.constructWebhookEvent(req.body, signature);
+    // Morning's standard webhook payload arrives as pre-parsed JSON,
+    // unlike Stripe which strictly required the raw request body buffer.
+    const event = req.body;
+
+    logger.info(`Morning payment webhook event received: ${event.type}`);
+
+    // Morning flags a successful transaction processing event via this type string:
+    if (event.type === 'payment.success' || event.event === 'document.created') {
+
+      // Extract the custom metadata context map we attached in Phase 2
+      const metadata = JSON.parse(event.custom || '{}');
+      const { userId, portfolioId } = metadata;
+
+      if (userId) {
+        // Pay-per-upload: mark the payment session completed so it becomes a
+        // valid upload voucher. Do NOT touch `consumed` here — the record is
+        // created with consumed:false at checkout time, and webhook retries
+        // must never re-arm a voucher that an upload already spent.
+        if (event.paymentFormId) {
+          await db.collection('payments').doc(event.paymentFormId).update({
+            status: 'completed',
+            completedAt: new Date().toISOString()
+          });
+        }
+
+        logger.info(`Payment session completed (upload voucher ready) for user: ${userId}`);
+      }
+    }
+
+    // Always acknowledge with a 200 to halt delivery retries from Morning's queues
+    return res.status(200).json({ received: true });
   } catch (err) {
-    logger.warn(`paymentController.handleWebhook: signature verification failed: ${err.message}`);
-    return res.status(err.statusCode || 400).json({
-      success: false,
-      message: err.message || 'Webhook signature verification failed',
-    });
-  }
+    // 🕵️‍♂️ ADD THIS TEMPORARY LINE RIGHT HERE:
+    console.error("🕵️‍♂️ DETECTED BUG IN CHKOUT FLOW:", err.response?.data || err);
 
-  try {
-    const result = await paymentService.handleWebhookEvent(event);
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode, err.errorCode || 'CHECKOUT_ERROR');
+    }
 
-    logger.info(`paymentController.handleWebhook: ${event.type} processed`, {
-      handled: result.handled,
-      message: result.message,
-    });
+    return sendError(res, 'Failed to create checkout session', 500, 'CHECKOUT_ERROR');
 
-    // Always return 200 to acknowledge receipt
-    return res.status(200).json({
-      received: true,
-      type: event.type,
-      handled: result.handled,
-    });
-  } catch (err) {
-    logger.error(`paymentController.handleWebhook: error processing ${event.type}: ${err.message}`);
-    // Return 500 so Stripe retries the webhook
-    return res.status(500).json({
-      success: false,
-      message: 'Webhook processing failed',
-    });
+    //logger.error(`Morning Webhook Processing Exception thrown: ${err.message}`);
+    //return res.status(500).json({ success: false, message: 'Internal processing error' });
   }
 };
 
@@ -163,6 +172,11 @@ exports.handleWebhook = async (req, res) => {
  * @param {import('express').Request}  req
  * @param {import('express').Response} res
  */
+
+// ── Real implementation (disabled while payment flow is mocked) ──────────────
+// To restore: uncomment the block below, delete the MOCK export that follows,
+// and re-enable the `protect` middleware on GET /stripe/status in routes/stripe.js.
+/*
 exports.getPaymentStatus = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -177,7 +191,7 @@ exports.getPaymentStatus = async (req, res) => {
       payments,
     }, 'Payment status retrieved');
   } catch (err) {
-    logger.error(`paymentController.getPaymentStatus error: ${err.message}`);
+    logger.error('paymentController.getPaymentStatus error:', err);
     return sendError(
       res,
       'Failed to retrieve payment status',
@@ -185,4 +199,13 @@ exports.getPaymentStatus = async (req, res) => {
       'PAYMENT_STATUS_ERROR'
     );
   }
+};
+*/
+
+// MOCK — payment gate is bypassed during development.
+exports.getPaymentStatus = async (_req, res) => {
+  return sendSuccess(res, {
+    hasPaid: true,
+    payments: [],
+  }, 'Payment status retrieved');
 };

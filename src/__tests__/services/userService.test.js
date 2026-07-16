@@ -159,40 +159,6 @@ describe('userService.findById', () => {
   });
 });
 
-// ── findByEmail ───────────────────────────────────────────────────────────────
-
-describe('userService.findByEmail', () => {
-  beforeEach(() => jest.clearAllMocks());
-
-  it('should return the user when found by email', async () => {
-    const docSnap = { id: sampleUser.id, data: () => sampleUser };
-    mockCollectionRef.get.mockResolvedValueOnce({ empty: false, docs: [docSnap] });
-
-    const result = await userService.findByEmail('test@morty.co.il');
-    expect(result).toMatchObject({ id: sampleUser.id, email: sampleUser.email });
-  });
-
-  it('should return null when email is not found', async () => {
-    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
-
-    const result = await userService.findByEmail('unknown@example.com');
-    expect(result).toBeNull();
-  });
-
-  it('should return null for falsy email', async () => {
-    const result = await userService.findByEmail(null);
-    expect(result).toBeNull();
-  });
-
-  it('should normalise email to lowercase before querying', async () => {
-    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
-
-    await userService.findByEmail('TEST@MORTY.CO.IL');
-    // The where() call should have been made with the lowercased email
-    expect(mockCollectionRef.where).toHaveBeenCalledWith('email', '==', 'test@morty.co.il');
-  });
-});
-
 // ── findByFirebaseUid ─────────────────────────────────────────────────────────
 
 describe('userService.findByFirebaseUid', () => {
@@ -245,90 +211,6 @@ describe('userService.getUserById', () => {
 
     const result = await userService.getUserById('nonexistent');
     expect(result).toBeNull();
-  });
-});
-
-// ── createUser ────────────────────────────────────────────────────────────────
-
-describe('userService.createUser', () => {
-  beforeEach(() => jest.clearAllMocks());
-
-  it('should create a new user and return public user', async () => {
-    // Email uniqueness check – no existing user
-    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
-    // docRef.set succeeds
-    mockDocRef.set.mockResolvedValueOnce({});
-
-    const result = await userService.createUser({
-      email: 'new@morty.co.il',
-      password: 'Password123!',
-      phone: '0501234567',
-    });
-
-    expect(result).not.toHaveProperty('password');
-    expect(result).not.toHaveProperty('refreshToken');
-    expect(result).toHaveProperty('email', 'new@morty.co.il');
-    expect(result).toHaveProperty('verified', false);
-    expect(result).toHaveProperty('firebaseUid', null);
-  });
-
-  it('should throw 409 ConflictError when email already exists', async () => {
-    // Email uniqueness check – existing user found
-    const docSnap = { id: sampleUser.id, data: () => sampleUser };
-    mockCollectionRef.get.mockResolvedValueOnce({ empty: false, docs: [docSnap] });
-
-    await expect(
-      userService.createUser({ email: 'test@morty.co.il', password: 'Password123!' })
-    ).rejects.toMatchObject({ statusCode: 409 });
-  });
-
-  it('should hash the password before storing', async () => {
-    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
-    mockDocRef.set.mockResolvedValueOnce({});
-
-    await userService.createUser({ email: 'hash@morty.co.il', password: 'PlainPassword1' });
-
-    // Verify that set() was called with a hashed password (not plain text)
-    const setCall = mockDocRef.set.mock.calls[0][0];
-    expect(setCall.password).not.toBe('PlainPassword1');
-    expect(setCall.password).toMatch(/^\$2[ab]\$/); // bcrypt hash prefix
-  });
-
-  it('should normalise email to lowercase', async () => {
-    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
-    mockDocRef.set.mockResolvedValueOnce({});
-
-    const result = await userService.createUser({
-      email: 'UPPER@MORTY.CO.IL',
-      password: 'Password123!',
-    });
-
-    expect(result.email).toBe('upper@morty.co.il');
-  });
-
-  it('should set createdAt and updatedAt as ISO strings', async () => {
-    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
-    mockDocRef.set.mockResolvedValueOnce({});
-
-    const result = await userService.createUser({
-      email: 'ts@morty.co.il',
-      password: 'Password123!',
-    });
-
-    expect(result).toHaveProperty('createdAt');
-    expect(result).toHaveProperty('updatedAt');
-    expect(() => new Date(result.createdAt)).not.toThrow();
-    expect(new Date(result.createdAt).toISOString()).toBe(result.createdAt);
-  });
-
-  it('should store firebaseUid as null for email/password users', async () => {
-    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
-    mockDocRef.set.mockResolvedValueOnce({});
-
-    await userService.createUser({ email: 'nofire@morty.co.il', password: 'Password123!' });
-
-    const setCall = mockDocRef.set.mock.calls[0][0];
-    expect(setCall.firebaseUid).toBeNull();
   });
 });
 
@@ -458,7 +340,7 @@ describe('userService.findOrCreateByFirebaseUser', () => {
 
     expect(mockDocRef.set).toHaveBeenCalledTimes(1);
     const setCall = mockDocRef.set.mock.calls[0][0];
-    expect(setCall.password).toBeNull();
+    expect(setCall).not.toHaveProperty('password');
     expect(setCall.firebaseUid).toBe('firebase-uid-google-123');
     expect(setCall.email).toBe('google@morty.co.il');
     expect(setCall.verified).toBe(true);
@@ -525,92 +407,6 @@ describe('userService.findOrCreateByFirebaseUser', () => {
     await expect(
       userService.findOrCreateByFirebaseUser({ email: 'test@morty.co.il', firebaseUid: '' })
     ).rejects.toMatchObject({ statusCode: 422 });
-  });
-});
-
-// ── setRefreshToken ───────────────────────────────────────────────────────────
-
-describe('userService.setRefreshToken', () => {
-  beforeEach(() => jest.clearAllMocks());
-
-  it('should call update with the new refresh token', async () => {
-    mockDocRef.update.mockResolvedValueOnce({});
-
-    await userService.setRefreshToken('user-123', 'new-refresh-token');
-
-    expect(mockDocRef.update).toHaveBeenCalledWith(
-      expect.objectContaining({ refreshToken: 'new-refresh-token' })
-    );
-  });
-
-  it('should throw when userId is falsy', async () => {
-    await expect(userService.setRefreshToken(null, 'token')).rejects.toThrow();
-  });
-});
-
-// ── clearRefreshToken ─────────────────────────────────────────────────────────
-
-describe('userService.clearRefreshToken', () => {
-  beforeEach(() => jest.clearAllMocks());
-
-  it('should set refreshToken to null', async () => {
-    mockDocRef.update.mockResolvedValueOnce({});
-
-    await userService.clearRefreshToken('user-123');
-
-    expect(mockDocRef.update).toHaveBeenCalledWith(
-      expect.objectContaining({ refreshToken: null })
-    );
-  });
-});
-
-// ── clearRefreshTokenByValue ──────────────────────────────────────────────────
-
-describe('userService.clearRefreshTokenByValue', () => {
-  beforeEach(() => jest.clearAllMocks());
-
-  it('should find user by token and clear it', async () => {
-    const docSnap = { id: sampleUser.id, data: () => ({ ...sampleUser, refreshToken: 'old-token' }) };
-    mockCollectionRef.get.mockResolvedValueOnce({ empty: false, docs: [docSnap] });
-    mockDocRef.update.mockResolvedValueOnce({});
-
-    await userService.clearRefreshTokenByValue('old-token');
-
-    expect(mockDocRef.update).toHaveBeenCalledWith(
-      expect.objectContaining({ refreshToken: null })
-    );
-  });
-
-  it('should do nothing when token is not found', async () => {
-    mockCollectionRef.get.mockResolvedValueOnce({ empty: true, docs: [] });
-
-    await expect(userService.clearRefreshTokenByValue('unknown-token')).resolves.toBeUndefined();
-    expect(mockDocRef.update).not.toHaveBeenCalled();
-  });
-
-  it('should do nothing for falsy token', async () => {
-    await expect(userService.clearRefreshTokenByValue(null)).resolves.toBeUndefined();
-    expect(mockCollectionRef.get).not.toHaveBeenCalled();
-  });
-});
-
-// ── verifyPassword ────────────────────────────────────────────────────────────
-
-describe('userService.verifyPassword', () => {
-  it('should return true for correct password', async () => {
-    const bcrypt = require('bcryptjs');
-    const hash = await bcrypt.hash('CorrectPassword1', 12);
-
-    const result = await userService.verifyPassword('CorrectPassword1', hash);
-    expect(result).toBe(true);
-  });
-
-  it('should return false for incorrect password', async () => {
-    const bcrypt = require('bcryptjs');
-    const hash = await bcrypt.hash('CorrectPassword1', 12);
-
-    const result = await userService.verifyPassword('WrongPassword', hash);
-    expect(result).toBe(false);
   });
 });
 

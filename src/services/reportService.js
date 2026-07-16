@@ -203,8 +203,12 @@ function generateFallbackReport(offer, portfolio, comparison) {
     comparison.rateDelta != null
       ? `${comparison.rateDelta > 0 ? '+' : ''}${comparison.rateDelta.toFixed(2)}%`
       : 'גבוהה מהממוצע';
+  const rateDeltaStrEn =
+    comparison.rateDelta != null
+      ? `${comparison.rateDelta > 0 ? '+' : ''}${comparison.rateDelta.toFixed(2)}%`
+      : 'above average';
 
-  const negotiationScript = `שלום, שמי [שם]. אני מעוניין/ת במשכנתא בסך ${(
+  const negotiationScriptHe = `שלום, שמי [שם]. אני מעוניין/ת במשכנתא בסך ${(
     comparison.loanAmount || 0
   ).toLocaleString('he-IL')} ₪ ל-${comparison.termYears || 30} שנים.
 
@@ -217,6 +221,20 @@ function generateFallbackReport(offer, portfolio, comparison) {
 אם תוכלו להציע לי ריבית תחרותית יותר, אני מוכן/ה לסגור את העסקה עוד היום.
 
 תודה רבה.`;
+
+  const negotiationScriptEn = `Hello, my name is [שם]. I am interested in a mortgage of ₪${(
+    comparison.loanAmount || 0
+  ).toLocaleString('en-US')} over ${comparison.termYears || 30} years.
+
+I checked the latest Bank of Israel data and saw that the average rate for a fixed unlinked mortgage stands at ${(
+    comparison.portfolioRate || 0
+  ).toFixed(2)}%.
+
+The offer I received from ${bankName} is ${rateDeltaStrEn} above that average. I ask that you match the offer to the market average.
+
+If you can offer me a more competitive rate, I am ready to close the deal today.
+
+Thank you.`;
 
   const insights = [
     {
@@ -244,7 +262,10 @@ function generateFallbackReport(offer, portfolio, comparison) {
 
   return {
     tricks,
-    negotiationScript,
+    negotiationScriptHe,
+    negotiationScriptEn,
+    // Legacy alias — older frontend code reads `negotiationScript` (Hebrew)
+    negotiationScript: negotiationScriptHe,
     insights,
     comparison,
     generatedAt: new Date().toISOString(),
@@ -275,7 +296,8 @@ You MUST respond with a valid JSON object containing exactly these fields:
       "potentialSavings": number_or_null
     }
   ],
-  "negotiationScript": "string (full Hebrew negotiation script, word-for-word, RTL)",
+  "negotiationScriptHe": "string (full Hebrew negotiation script, word-for-word, RTL)",
+  "negotiationScriptEn": "string (full English negotiation script, word-for-word, same content as the Hebrew one)",
   "insights": [
     {
       "titleHe": "string",
@@ -289,8 +311,10 @@ You MUST respond with a valid JSON object containing exactly these fields:
 
 Rules:
 - tricks: 3-5 actionable mortgage strategies. ALWAYS include 'מסלול פיתיון' (Enticement Track) if applicable.
-- negotiationScript: A complete, professional, word-for-word Hebrew script for the bank meeting. Include specific numbers from the offer.
+- negotiationScriptHe: A complete, professional, word-for-word Hebrew script for the bank meeting. Include specific numbers from the offer.
+- negotiationScriptEn: The same script, professionally written in English (not a literal translation — natural English).
 - insights: 3-5 strategic insights explaining the WHY behind recommendations.
+- Every text field MUST be provided in BOTH Hebrew and English.
 - Do NOT include PII. Use [שם] placeholder for the borrower's name.
 - All monetary values in ILS (₪).
 - Respond ONLY with the JSON object, no markdown.`;
@@ -324,9 +348,9 @@ function buildUserPrompt(offer, portfolio, comparison) {
 ${JSON.stringify(context, null, 2)}
 
 Generate:
-1. 3-5 mortgage tricks/strategies specific to this offer
-2. A complete Hebrew negotiation script using the actual numbers above
-3. 3-5 strategic insights explaining the recommendations
+1. 3-5 mortgage tricks/strategies specific to this offer (Hebrew + English)
+2. A complete negotiation script using the actual numbers above, in BOTH Hebrew and English
+3. 3-5 strategic insights explaining the recommendations (Hebrew + English)
 
 Respond with the JSON object as specified.`;
 }
@@ -381,18 +405,25 @@ async function generateEnhancedReport(offerId, userId, offer, portfolio) {
       ? aiResponse.insights.map(sanitizeInsight).filter(Boolean)
       : [];
 
-    const negotiationScript =
-      typeof aiResponse.negotiationScript === 'string'
-        ? aiResponse.negotiationScript.slice(0, 5000)
+    const negotiationScriptHe =
+      typeof aiResponse.negotiationScriptHe === 'string'
+        ? aiResponse.negotiationScriptHe.slice(0, 5000)
+        : '';
+    const negotiationScriptEn =
+      typeof aiResponse.negotiationScriptEn === 'string'
+        ? aiResponse.negotiationScriptEn.slice(0, 5000)
         : '';
 
-    if (tricks.length === 0 || !negotiationScript) {
+    if (tricks.length === 0 || !negotiationScriptHe || !negotiationScriptEn) {
       throw new Error('AI response missing required fields');
     }
 
     enhancedReport = {
       tricks,
-      negotiationScript,
+      negotiationScriptHe,
+      negotiationScriptEn,
+      // Legacy alias — older frontend code reads `negotiationScript` (Hebrew)
+      negotiationScript: negotiationScriptHe,
       insights,
       comparison,
       generatedAt: new Date().toISOString(),

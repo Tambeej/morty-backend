@@ -49,6 +49,10 @@ const checkoutLimiter = rateLimit({
  * @body   { portfolioId?: string, successUrl: string, cancelUrl?: string }
  * @returns { sessionId: string, url: string }
  */
+// MOCK — validate(checkoutSchema) removed while checkout is mocked so the
+// endpoint accepts whatever the frontend sends. Restore it when re-enabling
+// real Stripe checkout.
+/*
 router.post(
   '/checkout',
   protect,
@@ -56,6 +60,8 @@ router.post(
   validate(checkoutSchema),
   paymentController.createCheckout
 );
+*/
+router.post('/checkout', protect, checkoutLimiter, paymentController.createCheckout);
 
 /**
  * @route  POST /api/v1/stripe/webhook
@@ -75,10 +81,13 @@ router.post(
  * @access Private (requires authentication)
  * @returns { hasPaid: boolean, payments: Array }
  */
+/*
 router.get(
   '/status',
   protect,
   paymentController.getPaymentStatus
-);
+);*/
+//MOCK — bypass payment gate during development
+router.get('/status', paymentController.getPaymentStatus);
 
 module.exports = router;

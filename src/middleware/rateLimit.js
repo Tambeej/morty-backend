@@ -58,4 +58,29 @@ const paidEndpointLimiter = rateLimit({
   },
 });
 
-module.exports = { generalLimiter, paidEndpointLimiter };
+/**
+ * Auth endpoint rate limiter.
+ * Stricter than general to slow down brute-force / credential-stuffing.
+ */
+const authLimiter = rateLimit({
+  windowMs: parseInt(process.env.AUTH_RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
+  max: parseInt(process.env.AUTH_RATE_LIMIT_MAX, 10) || 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: {
+      code: 'RATE_LIMIT_EXCEEDED',
+      message: 'Too many authentication attempts. Please try again later.',
+    },
+  },
+  handler: (req, res, next, options) => {
+    logger.warn('Auth rate limit exceeded', {
+      ip: req.ip,
+      path: req.path,
+    });
+    res.status(429).json(options.message);
+  },
+});
+
+module.exports = { generalLimiter, paidEndpointLimiter, authLimiter };

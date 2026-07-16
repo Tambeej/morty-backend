@@ -1,8 +1,7 @@
 'use strict';
 
 const { getAuth } = require('../config/firebase');
-const { getDb } = require('../config/db');
-const COLLECTIONS = require('../config/collections');
+const userService = require('../services/userService');
 const { UnauthorizedError } = require('../utils/errors');
 const logger = require('../utils/logger');
 
@@ -38,25 +37,23 @@ async function protect(req, res, next) {
 
     const uid = decodedToken.uid;
 
-    // Fetch user document from Firestore
-    const db = getDb();
-    const userDoc = await db.collection(COLLECTIONS.USERS).doc(uid).get();
-
-    if (!userDoc.exists) {
+    // Look up the Firestore user doc by firebaseUid field — the document ID
+    // is an auto-generated Firestore ID, not the Firebase UID itself.
+    const userData = await userService.findByFirebaseUid(uid);
+    if (!userData) {
       throw new UnauthorizedError('User account not found');
     }
 
-    const userData = userDoc.data();
-
-    // Attach user to request
+    // Attach user to request. id is the Firestore doc ID (used by services);
+    // uid is the Firebase UID (used for re-verification).
     req.user = {
       uid,
-      id: uid,
+      id: userData.id,
       email: decodedToken.email || userData.email,
       ...userData,
     };
 
-    logger.debug('User authenticated', { uid });
+    logger.debug('User authenticated', { uid, id: userData.id });
     next();
   } catch (error) {
     next(error);

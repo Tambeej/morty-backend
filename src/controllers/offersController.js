@@ -3,7 +3,7 @@
  *
  * Handles mortgage offer file upload, listing, retrieval, deletion, and stats.
  * All database operations are delegated to offerService (Firestore-backed).
- * File uploads use offerService.uploadFileToCloudinary (stream-based, no disk I/O).
+ * File uploads use offerService.uploadFileToStorage (Firebase Storage).
  *
  * Routes:
  *   POST   /api/v1/offers          – upload a new offer file
@@ -17,6 +17,7 @@
 
 const offerService = require('../services/offerService');
 const aiService = require('../services/aiService');
+const paymentService = require('../services/paymentService');
 const logger = require('../utils/logger');
 
 // ── POST /api/v1/offers ───────────────────────────────────────────────────────
@@ -24,15 +25,24 @@ const logger = require('../utils/logger');
 /**
  * Upload a mortgage offer file.
  *
+ * Pay-per-upload: every upload must present an unconsumed payment session
+ * (the "voucher" from POST /stripe/checkout). The voucher is consumed
+ * atomically right before the upload is accepted — earlier failures (bad
+ * file, storage error) never burn the payment. The client keeps the
+ * sessionId until this endpoint returns success, so genuine retries reuse
+ * the same session; only `consumed: true` blocks reuse.
+ *
  * Expects multipart/form-data with:
- *   - file     (required) – PDF, PNG, or JPG (validated by multer middleware)
- *   - bankName (optional) – hint for the bank name
+ *   - file             (required) – PDF, PNG, or JPG (validated by multer middleware)
+ *   - paymentSessionId (required) – unconsumed checkout session ID (voucher)
+ *   - bankName         (optional) – hint for the bank name
  *
  * Flow:
- *   1. Stream file buffer to Cloudinary via offerService.uploadFileToCloudinary
- *   2. Create a Firestore offer document (status: 'pending')
- *   3. Trigger async AI analysis (non-blocking)
- *   4. Return { id, status: 'pending' } per API contract
+ *   1. Upload file buffer to Firebase Storage via offerService.uploadFileToStorage
+ *   2. Consume the payment voucher (atomic; 402 on failure + orphan cleanup)
+ *   3. Create a Firestore offer document (status: 'pending', linked to voucher)
+ *   4. Trigger async AI analysis (non-blocking)
+ *   5. Return { id, status: 'pending' } per API contract
  *
  * @param {import('express').Request}  req
  * @param {import('express').Response} res
@@ -44,25 +54,40 @@ exports.uploadOffer = async (req, res) => {
     }
 
     const userId = req.user.id;
-    const { bankName } = req.body;
+    const { bankName, paymentSessionId } = req.body;
 
-    // Stream buffer to Cloudinary (no temp file on disk)
-    let cloudinaryResult;
+    let uploadResult;
     try {
-      cloudinaryResult = await offerService.uploadFileToCloudinary(
+      uploadResult = await offerService.uploadFileToStorage(
         req.file.buffer,
-        req.file.mimetype
+        req.file.mimetype,
+        userId
       );
     } catch (uploadErr) {
-      logger.error(`offersController.uploadOffer: Cloudinary upload failed: ${uploadErr.message}`);
+      logger.error(`offersController.uploadOffer: Storage upload failed: ${uploadErr.message}`);
       return res.status(502).json({ success: false, message: 'File upload to storage failed' });
     }
 
-    // Create offer document in Firestore
+    // Consume the voucher now that the upload itself has succeeded.
+    const consumed = await paymentService.consumePaymentForUpload(userId, paymentSessionId);
+    if (!consumed) {
+      // Don't leave an orphan file behind for a rejected upload.
+      await offerService.deleteFileFromStorage(uploadResult.storagePath);
+      return res.status(402).json({
+        success: false,
+        error: {
+          code: 'PAYMENT_REQUIRED',
+          message:
+            'A valid unused payment is required for each upload. Please complete checkout and try again.',
+        },
+      });
+    }
+
     const offer = await offerService.createOffer(
       userId,
-      { url: cloudinaryResult.url, mimetype: req.file.mimetype },
-      bankName || ''
+      { storagePath: uploadResult.storagePath, mimetype: req.file.mimetype },
+      bankName || '',
+      paymentSessionId
     );
 
     // Trigger async AI analysis – fire-and-forget (non-blocking)
@@ -168,7 +193,7 @@ exports.getOffer = async (req, res) => {
 
 /**
  * Delete an offer by ID (must belong to the authenticated user).
- * Also removes the associated Cloudinary file.
+ * Also removes the associated Storage file.
  *
  * @param {import('express').Request}  req
  * @param {import('express').Response} res

@@ -1,5 +1,6 @@
 'use strict';
 
+const Joi = require('joi');
 const { ValidationError } = require('../utils/errors');
 
 /**
@@ -31,4 +32,50 @@ function validate(schema, source = 'body') {
   };
 }
 
-module.exports = { validate };
+// ── Financial profile schemas ─────────────────────────────────────────────────
+
+const debtItemSchema = Joi.object({
+  type: Joi.string().trim().max(100).required(),
+  amount: Joi.number().min(0).required(),
+});
+
+const financialSchema = Joi.object({
+  income: Joi.number().min(0).default(0),
+  additionalIncome: Joi.number().min(0).default(0),
+  expenses: Joi.object({
+    housing: Joi.number().min(0).default(0),
+    loans: Joi.number().min(0).default(0),
+    other: Joi.number().min(0).default(0),
+  }).default({ housing: 0, loans: 0, other: 0 }),
+  assets: Joi.object({
+    savings: Joi.number().min(0).default(0),
+    investments: Joi.number().min(0).default(0),
+  }).default({ savings: 0, investments: 0 }),
+  debts: Joi.array().items(debtItemSchema).max(20).default([]),
+});
+
+const financialDataSchema = financialSchema;
+
+const patchFinancialSchema = Joi.object({
+  income: Joi.number().min(0),
+  additionalIncome: Joi.number().min(0),
+  expenses: Joi.object({
+    housing: Joi.number().min(0),
+    loans: Joi.number().min(0),
+    other: Joi.number().min(0),
+  }),
+  assets: Joi.object({
+    savings: Joi.number().min(0),
+    investments: Joi.number().min(0),
+  }),
+  debts: Joi.array().items(debtItemSchema).max(20),
+}).min(1).messages({
+  'object.min': 'At least one financial field must be provided',
+});
+
+module.exports = {
+  validate,
+  financialSchema,
+  financialDataSchema,
+  patchFinancialSchema,
+};

@@ -16,47 +16,19 @@ const israeliPhone = Joi.string()
 
 /**
  * Schema for POST /auth/register
+ *
+ * Client obtains `idToken` from firebaseUser.getIdToken() after creating the
+ * Firebase Auth account (email/password or Google). `phone` is optional and
+ * only stored on brand-new Firestore user documents.
  */
 const registerSchema = Joi.object({
-  email: Joi.string().email({ tlds: { allow: false } }).required().messages({
-    'string.email': 'Please provide a valid email address.',
-    'any.required': 'Email is required.',
+  idToken: Joi.string().min(1).required().messages({
+    'string.base': 'Firebase ID token must be a string.',
+    'string.empty': 'Firebase ID token must not be empty.',
+    'string.min': 'Firebase ID token must not be empty.',
+    'any.required': 'Firebase ID token is required.',
   }),
-  password: Joi.string()
-    .min(8)
-    .max(128)
-    .pattern(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]).+$/)
-    .required()
-    .messages({
-      'string.min': 'Password must be at least 8 characters.',
-      'string.max': 'Password must not exceed 128 characters.',
-      'string.pattern.base':
-        'Password must contain at least one uppercase letter, one lowercase letter, one digit, and one special character.',
-      'any.required': 'Password is required.',
-    }),
   phone: israeliPhone.optional(),
-});
-
-/**
- * Schema for POST /auth/login
- */
-const loginSchema = Joi.object({
-  email: Joi.string().email({ tlds: { allow: false } }).required().messages({
-    'string.email': 'Please provide a valid email address.',
-    'any.required': 'Email is required.',
-  }),
-  password: Joi.string().required().messages({
-    'any.required': 'Password is required.',
-  }),
-});
-
-/**
- * Schema for POST /auth/refresh
- */
-const refreshTokenSchema = Joi.object({
-  refreshToken: Joi.string().required().messages({
-    'any.required': 'Refresh token is required.',
-  }),
 });
 
 /**
@@ -74,4 +46,4 @@ const googleSchema = Joi.object({
   }),
 });
 
-module.exports = { registerSchema, loginSchema, refreshTokenSchema, googleSchema };
+module.exports = { registerSchema, googleSchema };

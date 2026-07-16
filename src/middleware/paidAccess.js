@@ -1,21 +1,15 @@
 'use strict';
 
-const { ForbiddenError } = require('../utils/errors');
+// ── Real implementation (disabled while payment flow is mocked) ──────────────
+// To restore: delete the MOCK export at the bottom, uncomment the block below,
+// and un-comment the require lines above.
+/*
+const { AppError, ForbiddenError } = require('../utils/errors');
 const logger = require('../utils/logger');
 
-/**
- * `paidAccess` middleware — ensures the authenticated user has paid for
- * enhanced analysis access.
- *
- * Checks `req.user.paidAnalyses === true`.
- * Must be used AFTER the `protect` middleware.
- *
- * @throws {ForbiddenError} 403 if user has not paid.
- */
 function paidAccess(req, res, next) {
   try {
     if (!req.user) {
-      // Should not happen if protect runs first, but guard anyway
       throw new ForbiddenError('Authentication required before paid access check');
     }
 
@@ -24,16 +18,23 @@ function paidAccess(req, res, next) {
         uid: req.user.uid,
         paidAnalyses: req.user.paidAnalyses,
       });
-      throw new ForbiddenError(
-        'This feature requires a paid subscription. Please unlock the Closer Report to continue.'
+      throw new AppError(
+        'Payment required to analyze mortgage offers. Please complete checkout to continue.',
+        402,
+        'PAYMENT_REQUIRED'
       );
     }
 
-    logger.debug('Paid access granted', { uid: req.user.uid });
     next();
   } catch (error) {
     next(error);
   }
+}
+*/
+
+// MOCK — payment gate is bypassed during development. Always allow through.
+function paidAccess(_req, _res, next) {
+  return next();
 }
 
 module.exports = { paidAccess };
