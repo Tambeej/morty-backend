@@ -58,12 +58,23 @@ const SCENARIO_NAMES_EN = Object.freeze({
 });
 
 /** Descriptions (Hebrew) */
-const SCENARIO_DESCRIPTIONS = Object.freeze({
+const SCENARIO_DESCRIPTIONS_HE = Object.freeze({
   [SCENARIO_TYPES.MARKET_STANDARD]: '30 שנה – תמהיל מאוזן להחזר חודשי נמוך',
   [SCENARIO_TYPES.FAST_TRACK]: '20 שנה – חיסכון משמעותי בריבית',
   [SCENARIO_TYPES.INFLATION_PROOF]: 'מסלולים לא צמודים בלבד – הגנה מפני עליית מדד',
   [SCENARIO_TYPES.STABILITY_FIRST]: 'דגש על ריבית קבועה – החזר חודשי צפוי ויציב',
 });
+
+/** Descriptions (English) */
+const SCENARIO_DESCRIPTIONS_EN = Object.freeze({
+  [SCENARIO_TYPES.MARKET_STANDARD]: '30 years – balanced mix for a low monthly repayment',
+  [SCENARIO_TYPES.FAST_TRACK]: '20 years – significant interest savings',
+  [SCENARIO_TYPES.INFLATION_PROOF]: 'Non-indexed tracks only – protection against CPI increases',
+  [SCENARIO_TYPES.STABILITY_FIRST]: 'Fixed-rate focus – predictable, stable monthly repayment',
+});
+
+// Legacy alias — older code reads `SCENARIO_DESCRIPTIONS` (Hebrew)
+const SCENARIO_DESCRIPTIONS = SCENARIO_DESCRIPTIONS_HE;
 
 /** Track type labels (Hebrew) */
 const TRACK_LABELS_HE = Object.freeze({
@@ -71,6 +82,14 @@ const TRACK_LABELS_HE = Object.freeze({
   cpi: 'צמוד מדד',
   prime: 'פריים',
   variable: 'משתנה לא צמודה',
+});
+
+/** Track type labels (English) */
+const TRACK_LABELS_EN = Object.freeze({
+  fixed: 'Fixed Unlinked',
+  cpi: 'CPI-Linked',
+  prime: 'Prime',
+  variable: 'Variable Unlinked',
 });
 
 /** Stability preference threshold for Stability-First scenario */
@@ -620,7 +639,8 @@ function buildPortfolio(config, scenarioType, inputs, rates, generationMethod) {
 
     return {
       name: TRACK_LABELS_HE[track.type] || track.type,
-      nameEn: track.type,
+      nameHe: TRACK_LABELS_HE[track.type] || track.type,
+      nameEn: TRACK_LABELS_EN[track.type] || track.type,
       type: track.type,
       percentage: track.percentage,
       rate: track.rate,
@@ -648,7 +668,11 @@ function buildPortfolio(config, scenarioType, inputs, rates, generationMethod) {
     type: scenarioType,
     name: SCENARIO_NAMES_EN[scenarioType] || scenarioType,
     nameHe: SCENARIO_NAMES_HE[scenarioType] || scenarioType,
-    description: SCENARIO_DESCRIPTIONS[scenarioType] || '',
+    nameEn: SCENARIO_NAMES_EN[scenarioType] || scenarioType,
+    // Legacy alias — older frontend code reads `description` (Hebrew)
+    description: SCENARIO_DESCRIPTIONS_HE[scenarioType] || '',
+    descriptionHe: SCENARIO_DESCRIPTIONS_HE[scenarioType] || '',
+    descriptionEn: SCENARIO_DESCRIPTIONS_EN[scenarioType] || '',
     termYears,
     tracks: enrichedTracks,
     monthlyRepayment: totalMonthlyRepayment,
@@ -689,7 +713,8 @@ function enrichPortfolio(aiPortfolio, scenarioType, inputs, rates) {
 
     return {
       name: TRACK_LABELS_HE[track.type] || track.type,
-      nameEn: track.type,
+      nameHe: TRACK_LABELS_HE[track.type] || track.type,
+      nameEn: TRACK_LABELS_EN[track.type] || track.type,
       type: track.type,
       percentage: track.percentage,
       rate: track.rate,
@@ -716,7 +741,11 @@ function enrichPortfolio(aiPortfolio, scenarioType, inputs, rates) {
     type: scenarioType,
     name: SCENARIO_NAMES_EN[scenarioType] || scenarioType,
     nameHe: SCENARIO_NAMES_HE[scenarioType] || scenarioType,
-    description: SCENARIO_DESCRIPTIONS[scenarioType] || '',
+    nameEn: SCENARIO_NAMES_EN[scenarioType] || scenarioType,
+    // Legacy alias — older frontend code reads `description` (Hebrew)
+    description: SCENARIO_DESCRIPTIONS_HE[scenarioType] || '',
+    descriptionHe: SCENARIO_DESCRIPTIONS_HE[scenarioType] || '',
+    descriptionEn: SCENARIO_DESCRIPTIONS_EN[scenarioType] || '',
     termYears,
     tracks: enrichedTracks,
     monthlyRepayment: totalMonthlyRepayment,
@@ -864,7 +893,10 @@ module.exports = {
   SCENARIO_NAMES_HE,
   SCENARIO_NAMES_EN,
   SCENARIO_DESCRIPTIONS,
+  SCENARIO_DESCRIPTIONS_HE,
+  SCENARIO_DESCRIPTIONS_EN,
   TRACK_LABELS_HE,
+  TRACK_LABELS_EN,
   STABILITY_THRESHOLD,
   CPI_RATE_THRESHOLD,
   MAX_REPAYMENT_RATIO,

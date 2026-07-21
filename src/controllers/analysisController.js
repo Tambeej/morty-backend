@@ -35,7 +35,9 @@ const logger = require('../utils/logger');
  *       riskLevel: 'low'|'medium'|'high',
  *       potentialSavings: number|null
  *     }>,
- *     negotiationScript: string,
+ *     negotiationScriptHe: string,
+ *     negotiationScriptEn: string,
+ *     negotiationScript: string,   // legacy alias (Hebrew)
  *     insights: Array<{
  *       titleHe: string,
  *       titleEn: string,
@@ -168,7 +170,19 @@ function buildResponseData(report) {
     // Mortgage tricks (3-5 strategies, always includes Enticement Track)
     tricks: Array.isArray(report.tricks) ? report.tricks : [],
 
-    // Word-for-word Hebrew negotiation script
+    // Word-for-word negotiation script in both languages so the frontend
+    // can display whichever matches the user's chosen language.
+    // Cached reports generated before the bilingual fields existed only
+    // have `negotiationScript` (Hebrew) — fall back to it for `He`.
+    negotiationScriptHe: typeof report.negotiationScriptHe === 'string' && report.negotiationScriptHe
+      ? report.negotiationScriptHe
+      : (typeof report.negotiationScript === 'string' ? report.negotiationScript : ''),
+
+    negotiationScriptEn: typeof report.negotiationScriptEn === 'string'
+      ? report.negotiationScriptEn
+      : '',
+
+    // Legacy alias — older frontend code reads `negotiationScript` (Hebrew)
     negotiationScript: typeof report.negotiationScript === 'string'
       ? report.negotiationScript
       : '',
